@@ -40,7 +40,7 @@ import {
 import { LoadingButton } from '@mui/lab';
 import DeleteIcon from '@mui/icons-material/Delete';
 import EditIcon from '@mui/icons-material/Edit';
-import { firestoreService } from '../services/firestoreService';
+import { ruleService } from '../services/ruleService';
 import config from '../config';
 
 const RULE_TYPES = {
@@ -71,23 +71,23 @@ export default function RuleManager() {
 
   const checkApiHealth = async () => {
     try {
-      const health = await firestoreService.checkHealth();
+      const health = await ruleService.checkHealth();
       setApiHealth(health);
       setError(null);
     } catch (error) {
       setApiHealth(null);
-      setError(`API Connection Error: Unable to connect to ${config.apiUrl}`);
+      setError(`API Connection Error: Mock rule service unavailable`);
     }
   };
 
   const fetchRules = async () => {
     setLoading(true);
     try {
-      const rulesList = await firestoreService.getRules();
+      const rulesList = await ruleService.getRules();
       setRules(rulesList || []);
       setError(null);
     } catch (error) {
-      setError('Failed to fetch rules. Please try again.');
+      setError('Failed to fetch mock rules. Please try again.');
       console.error('Error fetching rules:', error);
       setRules([]);
     }
@@ -146,16 +146,16 @@ export default function RuleManager() {
       validateRule(currentRule);
       
       if (editingRule) {
-        await firestoreService.updateRule(editingRule.id, currentRule);
+        await ruleService.updateRule(editingRule.id, currentRule);
       } else {
-        await firestoreService.createRule(currentRule);
+        await ruleService.createRule(currentRule);
       }
       
       await fetchRules();
       handleCloseDialog();
       setError(null);
     } catch (error) {
-      setError(error.message || 'Failed to save rule. Please try again.');
+      setError(error.message || 'Failed to save mock rule. Please try again.');
       console.error('Error saving rule:', error);
     }
     setLoading(false);
@@ -165,11 +165,11 @@ export default function RuleManager() {
     if (window.confirm('Are you sure you want to delete this rule?')) {
       setLoading(true);
       try {
-        await firestoreService.deleteRule(ruleId);
+        await ruleService.deleteRule(ruleId);
         await fetchRules();
         setError(null);
       } catch (error) {
-        setError('Failed to delete rule. Please try again.');
+        setError('Failed to delete mock rule. Please try again.');
         console.error('Error deleting rule:', error);
       }
       setLoading(false);
@@ -189,18 +189,18 @@ export default function RuleManager() {
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
         <Box>
           <Typography variant="h5" sx={{ mb: 1 }}>Search Rules Management</Typography>
-          {apiHealth && (
-            <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+          <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', flexDirection: 'column', alignItems: 'flex-start' }}>
+            {apiHealth && (
               <Chip
-                label={`API: ${apiHealth.status}`}
+                label={`Status: ${apiHealth.status}`}
                 color={apiHealth.status === 'healthy' ? 'success' : 'error'}
                 size="small"
               />
-              <Typography variant="caption" color="text.secondary">
-                {config.apiUrl}
-              </Typography>
-            </Box>
-          )}
+            )}
+            <Typography variant="caption" color="text.secondary" sx={{ fontStyle: 'italic' }}>
+              Using mock data (Spanner implementation coming soon)
+            </Typography>
+          </Box>
         </Box>
         <Button
           variant="contained"
@@ -319,4 +319,4 @@ export default function RuleManager() {
       </Dialog>
     </Box>
   );
-} 
+}

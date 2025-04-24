@@ -42,16 +42,26 @@ Click on any product card or title in the search results to navigate to its dedi
 
 ## Managing Rules (Admin Feature)
 
-*Note: Access to rule management might be restricted to administrators.*
+*Note: The Rules Management feature is currently in transition from Firestore to Spanner.*
 
-PSearch includes a Rules Engine, likely managed through a separate interface or the Rules API.
+PSearch includes a Rules Engine that allows administrators to configure search behavior:
 
-1.  **Access Rule Management:** Find the URL for the Rules API or any associated admin UI. This might be another Terraform output or a known endpoint.
-2.  **Authenticate:** You may need specific credentials or permissions to access rule management.
-3.  **Create/Modify Rules:** Use the interface or API to:
-    *   **Boost Products:** Increase the ranking of specific products for certain search terms or conditions.
-    *   **Bury Products:** Decrease the ranking of specific products.
-    *   Define conditions under which rules apply (e.g., specific query terms, user segments).
-4.  **Save Changes:** Ensure your rule configurations are saved. The Search API will automatically apply active rules during subsequent searches.
+1.  **Access Rule Management:** 
+    * From the main UI, click on the "Manage Rules" button in the navigation bar
+    * This will take you to the rules management interface
 
-*(Refer to the specific documentation for the Rules API or admin UI for detailed instructions on rule creation and management.)*
+2.  **Create/Modify Rules:** Use the interface to:
+    * **Boost Products:** Increase the ranking of specific products based on categories, brands, price ranges, or product IDs
+    * **Bury Products:** Decrease the ranking of specific products that match certain criteria
+    * Define conditions under which rules apply (e.g., specific categories, brands)
+    * Set score values to control the magnitude of boosting or burying
+
+3.  **Implementation Note:** 
+    * The current implementation uses client-side storage (localStorage) for persistence while in development
+    * Rules are stored locally in your browser
+    * A future update will migrate rule storage to Spanner for production use
+
+4.  **Rule Application:**
+    * Once created, rules will automatically influence search results according to their defined conditions
+    * Higher boost scores increase a product's visibility in search results
+    * Higher bury scores decrease a product's visibility
