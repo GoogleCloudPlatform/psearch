@@ -242,6 +242,26 @@ For local development:
    ```
    This will start the GenAI services on http://localhost:8081.
 
+### Google Cloud Costs
+
+When deploying this project, consider the [cost estimation](https://cloud.google.com/products/calculator?e=0&hl=en&dl=CjhDaVJsTkdFME5XUTRZeTAzWXpaa0xUUmxZakV0WVdJeU9DMDBPV015TmpVMU9HRTRaak1RQVE9PRASGiQ3N0M1REY3MS1FOTM1LTRBQTgtOThFMC02MzIzQzQzMTE2NkU) for Google Cloud Products.
+
+This estimation supports the following volume:
+* 500k SKUs for hybrid search
+* 70k queries/day
+
+| Service | GCP Product | Cost |
+|-----------|--------|-------|
+| Catalog | Cloud Spanner | $987.90 |
+| Search API | Cloud Run | $115.63 |
+| UI | Cloud Run | $115.63 |
+| GenAI API | Cloud Run | $115.63 |
+| Embeddings - Search API | Vertex AI | $10.65 |
+| Embeddings - Ingestion | Vertex AI | $121.67 |
+| **TOTAL** | - | **$1,491.06** |
+
+⚠️ **Disclamer:** This estimation does not include any Gemini-related costs. You will need to calculate those separately for your deployment based on your usage/volume.
+
 ## Data Ingestion
 
 The ingestion process uses a Cloud Run Job (`src/psearch/ingestion/`) to read product data, generate embeddings, and load into Spanner.
