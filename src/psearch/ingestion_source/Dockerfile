@@ -26,10 +26,10 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy source code
-COPY . /app/ingestion
+COPY . /app/ingestion_source
 
 # Set Python path
 ENV PYTHONPATH=/app
 
 # Set the entrypoint
-CMD ["python", "-m", "ingestion.main"] 
+CMD ["python", "-m", "ingestion_source.main"]

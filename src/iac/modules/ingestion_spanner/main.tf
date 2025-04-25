@@ -44,7 +44,7 @@ resource "google_artifact_registry_repository" "ingestion_repo" {
 # Create zip file from source code
 data "archive_file" "source_zip" {
   type        = "zip"
-  source_dir  = "${path.root}/../../src/psearch/ingestion"
+  source_dir  = "${path.root}/../../src/psearch/ingestion_spanner"
   output_path = "${path.module}/tmp/source.zip"
 }
 

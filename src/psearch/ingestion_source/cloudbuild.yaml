@@ -19,7 +19,7 @@ steps:
     args: [
       'build',
       '-t', '${_REGION}-docker.pkg.dev/${_PROJECT_ID}/${_REPOSITORY}/${_IMAGE_NAME}:latest',
-      '-f', 'src/psearch/ingestion/Dockerfile',
+      '-f', 'src/psearch/ingestion_source/Dockerfile',
       '.'
     ]
 
@@ -34,4 +34,4 @@ images:
   - '${_REGION}-docker.pkg.dev/${_PROJECT_ID}/${_REPOSITORY}/${_IMAGE_NAME}:latest'
 
 options:
-  logging: CLOUD_LOGGING_ONLY 
+  logging: CLOUD_LOGGING_ONLY

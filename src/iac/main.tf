@@ -93,7 +93,7 @@ module "spanner" {
 }
 
 module "ingestion" {
-  source                = "./modules/ingestion"
+  source                = "./modules/ingestion_spanner"
   project_id            = var.project_id
   region                = var.region
   service_account_email = module.iam.ingestion_service_account_email

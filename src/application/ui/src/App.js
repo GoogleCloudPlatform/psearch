@@ -34,8 +34,10 @@ import {
 } from '@mui/material';
 import SearchIcon from '@mui/icons-material/Search';
 import SettingsIcon from '@mui/icons-material/Settings';
+import FileUploadIcon from '@mui/icons-material/FileUpload';
 import RuleManager from './components/RuleManager';
 import ProductDetails from './components/ProductDetails';
+import SourceIngestion from './components/SourceIngestion';
 import Filters from './components/Filters'; // Import the custom filters component
 import AIFilterSuggestion from './components/AIFilterSuggestion'; // Import the AI filter suggestion component
 import ProductImage from './components/ProductImage'; // Import the optimized ProductImage component
@@ -861,28 +863,38 @@ function App() {
                             <Typography variant="h6" component="div" sx={{ flexGrow: 1 }}>
                                 PSearch
                             </Typography>
-                            <Button
-                                component={Link}
-                                to="/"
-                                color="inherit"
-                                startIcon={<SearchIcon />}
-                                sx={{ mr: 2 }}
-                            >
-                                Search
-                            </Button>
-                            <Button
-                                component={Link}
-                                to="/manage"
-                                color="inherit"
-                                startIcon={<SettingsIcon />}
-                            >
-                                Manage Rules
-                            </Button>
+            <Button
+                component={Link}
+                to="/"
+                color="inherit"
+                startIcon={<SearchIcon />}
+                sx={{ mr: 2 }}
+            >
+                Search
+            </Button>
+            <Button
+                component={Link}
+                to="/source-ingestion"
+                color="inherit"
+                startIcon={<FileUploadIcon />}
+                sx={{ mr: 2 }}
+            >
+                Source Ingestion
+            </Button>
+            <Button
+                component={Link}
+                to="/manage"
+                color="inherit"
+                startIcon={<SettingsIcon />}
+            >
+                Manage Rules
+            </Button>
                         </Toolbar>
                     </AppBar>
 
                     <Routes>
                         <Route path="/" element={<ProductSearch />} />
+                        <Route path="/source-ingestion" element={<SourceIngestion />} />
                         <Route path="/manage" element={<RuleManager />} />
                         <Route path="/product/:productId" element={<ProductDetails />} />
                     </Routes>

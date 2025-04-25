@@ -16,13 +16,14 @@
 
 // In production, this will be provided by the environment variable at build time
 // In development, we use the provided URL for testing
-const apiUrl = process.env.REACT_APP_API_URL || 'https://localhost:8080';
+const apiUrl = process.env.REACT_APP_API_URL || 'http://localhost:8080';
 const genAiUrl = process.env.REACT_APP_GEN_AI_URL || 'https://localhost:8081';
 
 const config = {
   // Store the base API URLs
   apiUrl: apiUrl,
   genAiUrl: genAiUrl,
+  projectId: process.env.REACT_APP_PROJECT_ID || 'your-project-id',
 };
 
 // Log the configuration

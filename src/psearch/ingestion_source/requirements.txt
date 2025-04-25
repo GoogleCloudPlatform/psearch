@@ -1,0 +1,26 @@
+# Google Cloud dependencies
+google-cloud-bigquery>=3.11.4
+google-cloud-storage>=2.13.0
+google-auth>=2.27.0
+
+# Web framework and API
+fastapi>=0.103.0
+uvicorn>=0.23.2
+python-multipart>=0.0.6
+
+# Data processing
+pandas>=2.0.0
+numpy>=1.24.0
+pyarrow>=14.0.0
+
+# File processing
+openpyxl>=3.1.2
+smart-open>=6.4.0
+
+# Schema detection and validation
+pydantic>=2.5.0
+jsonschema>=4.19.0
+
+# Logging and utilities
+python-dotenv>=1.0.0
+tenacity>=8.2.0
