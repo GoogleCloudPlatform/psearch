@@ -18,18 +18,22 @@
 // In development, we use the provided URL for testing
 const apiUrl = process.env.REACT_APP_API_URL || 'http://localhost:8080';
 const genAiUrl = process.env.REACT_APP_GEN_AI_URL || 'https://localhost:8081';
+const ingestionSourceUrl = process.env.REACT_APP_INGESTION_SOURCE_URL || 'https://localhost:8082';
 
 const config = {
   // Store the base API URLs
   apiUrl: apiUrl,
   genAiUrl: genAiUrl,
+  ingestionSourceUrl: ingestionSourceUrl,
   projectId: process.env.REACT_APP_PROJECT_ID || 'your-project-id',
 };
 
 // Log the configuration
 console.log(`API URL: ${apiUrl}`);
 console.log(`Gen AI URL: ${genAiUrl}`);
+console.log(`Ingestion Source URL: ${ingestionSourceUrl}`);
 
 export const API_URL = config.apiUrl;
 export const GEN_AI_URL = config.genAiUrl;
+export const INGESTION_SOURCE_URL = config.ingestionSourceUrl
 export default config;

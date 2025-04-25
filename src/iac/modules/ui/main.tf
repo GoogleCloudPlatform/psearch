@@ -59,7 +59,7 @@ resource "null_resource" "build_image" {
         --project=${var.project_id} \
         --region=${var.region} \
         --config=${path.root}/../../src/application/ui/cloudbuild.yaml \
-        --substitutions=_REACT_APP_API_URL="${var.search_api_url}",_REACT_APP_GEN_AI_URL="${var.gen_ai_url}",_LOCATION="${var.region}",_REPOSITORY="${google_artifact_registry_repository.ui_repo.repository_id}",_IMAGE_NAME="${local.service_name}"
+        --substitutions=_REACT_INGESTION_SOURCE_API_URL="${var.ingestion_source_url}",_REACT_APP_API_URL="${var.search_api_url}",_REACT_APP_GEN_AI_URL="${var.gen_ai_url}",_LOCATION="${var.region}",_REPOSITORY="${google_artifact_registry_repository.ui_repo.repository_id}",_IMAGE_NAME="${local.service_name}"
     EOF
   }
 

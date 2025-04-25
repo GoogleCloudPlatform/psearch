@@ -79,3 +79,8 @@ variable "gen_ai_url" {
   description = "The URL of the Gen AI service"
   type        = string
 }
+
+variable "ingestion_source_url" {
+  description = "The URL of the Ingestion Source service"
+  type        = string
+}

@@ -92,7 +92,7 @@ module "spanner" {
   ]
 }
 
-module "ingestion" {
+module "ingestion_spanner" {
   source                = "./modules/ingestion_spanner"
   project_id            = var.project_id
   region                = var.region
@@ -122,18 +122,31 @@ module "ui" {
   source                = "./modules/ui"
   project_id            = var.project_id
   region                = var.region
-  service_account_email = module.iam.ingestion_service_account_email # Using the same service account for now
+  service_account_email = module.iam.ingestion_service_account_email # TODO: Create a new Service Account for this service
   search_api_url        = module.search_api.service_url
   gen_ai_url            = module.gen_ai.service_url
+  ingestion_source_url  = module.ingestion_source.service_url
 
   depends_on = [
     module.search_api,
-    module.gen_ai
+    module.gen_ai,
+    module.ingestion_source
   ]
 }
 
 module "gen_ai" {
   source                = "./modules/gen_ai"
+  project_id            = var.project_id
+  region                = var.region
+  service_account_email = module.iam.ingestion_service_account_email # TODO: Create a new Service Account for this service
+
+  depends_on = [
+    module.iam
+  ]
+}
+
+module "ingestion_source" {
+  source                = "./modules/ingestion_source"
   project_id            = var.project_id
   region                = var.region
   service_account_email = module.iam.ingestion_service_account_email # TODO: Create a new Service Account for this service

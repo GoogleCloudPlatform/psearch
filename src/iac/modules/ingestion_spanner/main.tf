@@ -14,7 +14,7 @@
 # limitations under the License.
 
 locals {
-  service_name = "product-ingestion"
+  service_name = "product-ingestion-spanner"
 }
 
 # Create Cloud Storage bucket for the source code
