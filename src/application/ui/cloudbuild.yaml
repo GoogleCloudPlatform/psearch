@@ -18,7 +18,7 @@ steps:
   - name: 'gcr.io/cloud-builders/docker'
     args: [
       'build',
-      '--build-arg', 'REACT_INGESTION_SOURCE_API_URL=${_REACT_INGESTION_SOURCE_API_URL}',
+      '--build-arg', 'REACT_APP_INGESTION_SOURCE_API_URL=${_REACT_APP_INGESTION_SOURCE_API_URL}',
       '--build-arg', 'REACT_APP_API_URL=${_REACT_APP_API_URL}',
       '--build-arg', 'REACT_APP_GEN_AI_URL=${_REACT_APP_GEN_AI_URL}',
       '-t', '${_LOCATION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_IMAGE_NAME}:latest',
@@ -39,9 +39,9 @@ options:
   logging: CLOUD_LOGGING_ONLY
 
 substitutions:
-  _REACT_INGESTION_SOURCE_API_URL: 'http://localhost:8082'  # Default value, will be overridden
-  _REACT_APP_API_URL: 'http://localhost:8080'               # Default value, will be overridden
-  _REACT_APP_GEN_AI_URL: 'http://localhost:8081'            # Default value, will be overridden
-  _LOCATION: 'us-central1'                                  # Default value, will be overridden
-  _REPOSITORY: 'psearch-ui-repo'                            # Default value, will be overridden
-  _IMAGE_NAME: 'psearch-ui'                                 # Default value, will be overridden
+  _REACT_APP_INGESTION_SOURCE_API_URL: 'http://localhost:8082'  # Default value, will be overridden
+  _REACT_APP_API_URL: 'http://localhost:8080'                   # Default value, will be overridden
+  _REACT_APP_GEN_AI_URL: 'http://localhost:8081'                # Default value, will be overridden
+  _LOCATION: 'us-central1'                                      # Default value, will be overridden
+  _REPOSITORY: 'psearch-ui-repo'                                # Default value, will be overridden
+  _IMAGE_NAME: 'psearch-ui'                                     # Default value, will be overridden

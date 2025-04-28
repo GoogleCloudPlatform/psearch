@@ -14,7 +14,7 @@
 # limitations under the License.
 
 locals {
-  service_name = "psearch-ui"
+  service_name = "ingestion-source-service"
 }
 
 # Create Cloud Storage bucket for the source code
@@ -26,7 +26,7 @@ resource "google_storage_bucket" "source_bucket" {
 }
 
 # Create Artifact Registry Repository
-resource "google_artifact_registry_repository" "ui_repo" {
+resource "google_artifact_registry_repository" "ingestion_source_repo" {
   location      = var.region
   repository_id = "${local.service_name}-repo"
   description   = "Docker repository for ${local.service_name} images"
@@ -36,7 +36,7 @@ resource "google_artifact_registry_repository" "ui_repo" {
 # Create zip file from source code
 data "archive_file" "source_zip" {
   type        = "zip"
-  source_dir  = "${path.root}/../../src/application/ui"
+  source_dir  = "${path.root}/../../src/psearch/ingestion_source"
   output_path = "${path.module}/tmp/source.zip"
 }
 
@@ -47,7 +47,7 @@ resource "google_storage_bucket_object" "source_code" {
   source = data.archive_file.source_zip.output_path
 }
 
-# Build the container image using cloudbuild.yaml
+# Build the container image
 resource "null_resource" "build_image" {
   triggers = {
     source_zip_hash = data.archive_file.source_zip.output_md5
@@ -58,30 +58,38 @@ resource "null_resource" "build_image" {
       gcloud builds submit ${data.archive_file.source_zip.output_path} \
         --project=${var.project_id} \
         --region=${var.region} \
-        --config=${path.root}/../../src/application/ui/cloudbuild.yaml \
-        --substitutions=_REACT_APP_INGESTION_SOURCE_API_URL="${var.ingestion_source_url}",_REACT_APP_API_URL="${var.search_api_url}",_REACT_APP_GEN_AI_URL="${var.gen_ai_url}",_LOCATION="${var.region}",_REPOSITORY="${google_artifact_registry_repository.ui_repo.repository_id}",_IMAGE_NAME="${local.service_name}"
+        --tag=${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.ingestion_source_repo.repository_id}/${local.service_name}:latest
     EOF
   }
 
   depends_on = [
-    google_artifact_registry_repository.ui_repo,
+    google_artifact_registry_repository.ingestion_source_repo,
     google_storage_bucket_object.source_code
   ]
 }
 
 # Update Cloud Run service to use the built image
 locals {
-  image_path = "${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.ui_repo.repository_id}/${local.service_name}"
+  image_path = "${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.ingestion_source_repo.repository_id}/${local.service_name}"
 }
 
 # Create a Cloud Run service
-resource "google_cloud_run_v2_service" "ui_service" {
+resource "google_cloud_run_v2_service" "ingestion_source_service" {
   name     = local.service_name
   location = var.region
 
   template {
     containers {
       image = "${local.image_path}:latest"
+
+      env {
+        name  = "PROJECT_ID"
+        value = var.project_id
+      }
+      env {
+        name  = "REGION"
+        value = var.region
+      }
 
       resources {
         limits = {
@@ -90,26 +98,8 @@ resource "google_cloud_run_v2_service" "ui_service" {
         }
       }
 
-      # Set up a health check for the container
-      startup_probe {
-        http_get {
-          path = "/"
-          port = 8080
-        }
-        initial_delay_seconds = 5
-        timeout_seconds       = 5
-        period_seconds        = 10
-        failure_threshold     = 3
-      }
-
-      liveness_probe {
-        http_get {
-          path = "/"
-          port = 8080
-        }
-        initial_delay_seconds = 10
-        timeout_seconds       = 5
-        period_seconds        = 15
+      ports {
+        container_port = 8080
       }
     }
 
@@ -141,7 +131,7 @@ data "google_iam_policy" "noauth" {
 }
 
 resource "google_cloud_run_v2_service_iam_policy" "noauth" {
-  location    = google_cloud_run_v2_service.ui_service.location
-  name        = google_cloud_run_v2_service.ui_service.name
+  location    = google_cloud_run_v2_service.ingestion_source_service.location
+  name        = google_cloud_run_v2_service.ingestion_source_service.name
   policy_data = data.google_iam_policy.noauth.policy_data
 }
