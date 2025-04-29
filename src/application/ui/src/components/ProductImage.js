@@ -361,16 +361,26 @@ const ProductImage = memo(({ imageUrl, productName }) => {
     return (
         <div
             ref={containerRef}
-            style={{ position: 'relative', height: '200px' }}
+            style={{ 
+                position: 'relative', 
+                height: '180px', // Reduced height to match smaller cards
+                width: '100%',
+                overflow: 'hidden',
+                backgroundColor: '#f5f5f5', // Light gray background for empty spaces
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center'
+            }}
         >
             <img
                 ref={imgRef}
                 src={src}
                 alt={productName}
                 style={{
-                    width: '100%',
-                    height: '200px',
-                    objectFit: 'cover',
+                    maxWidth: '100%',
+                    maxHeight: '170px',
+                    objectFit: 'contain', // Changed to contain to maintain aspect ratio
+                    objectPosition: 'center',
                     display: 'block'
                 }}
                 loading="lazy" // Use browser's lazy loading for off-screen images

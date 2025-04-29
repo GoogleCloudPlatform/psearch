@@ -59,7 +59,7 @@ def get_image_description(image_bytes, project_id, product_data):
         category = product_data.get('category', '')
         retail_price = product_data.get('retail_price', '')
         
-        prompt = f"""Analyze this {brand_name} product image and provide a compelling e-commerce description that includes:
+        prompt = f"""Analyze this {brand_name} product image and provide a compelling e-commerce pharmacy description that includes:
 1. Product name: {product_name}
 2. Brand highlights: Emphasize {brand_name}'s reputation and quality in the {category} category
 3. Key product features and specifications

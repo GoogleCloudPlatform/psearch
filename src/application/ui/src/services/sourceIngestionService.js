@@ -322,6 +322,207 @@ export const sourceIngestionService = {
 
     const response = await axios.get(`${INGESTION_SOURCE_URL}/jobs/${jobId}`);
     return response.data;
+  },
+
+  /**
+   * Ensures a BigQuery dataset exists, creating it if necessary.
+   * @param {string} datasetId The ID of the dataset to ensure exists
+   * @returns {Promise<object>} Object indicating success or containing error details
+   */
+  ensureDatasetExists: async (datasetId) => {
+    if (sourceIngestionService.useMockMode()) {
+      console.log(`Mock ensuring dataset ${datasetId} exists`);
+      return {
+        dataset_id: datasetId,
+        location: "US",
+        created: false, // Pretend it already existed
+        message: `Dataset ${datasetId} already exists`
+      };
+    }
+
+    try {
+      console.log(`Ensuring dataset ${datasetId} exists`);
+      const response = await axios.post(`${INGESTION_SOURCE_URL}/ensure-dataset`, {
+        dataset_id: datasetId,
+        location: "US"
+      });
+      
+      console.log("Dataset ensure response:", response.data);
+      return response.data;
+    } catch (error) {
+      console.error(`Error ensuring dataset ${datasetId} exists:`, error);
+      throw error;
+    }
+  },
+
+  /**
+   * Performs a BigQuery dry run for the given SQL script.
+   * @param {string} sqlScript The SQL script to validate.
+   * @returns {Promise<object>} Object indicating success or containing error details.
+   *                            Example success: { valid: true, message: "SQL syntax validated successfully" }
+   *                            Example error: { valid: false, error: "Error message..." }
+   */
+  dryRunQuery: async (sqlScript) => {
+    // Check if we should use mock mode
+    if (sourceIngestionService.useMockMode()) {
+      console.log("Using mock dry run for SQL validation");
+      
+      // Clear past refinement state to test fresh (keep mock behavior for testing)
+      localStorage.removeItem('sqlRefined');
+      
+      return new Promise((resolve, reject) => {
+        setTimeout(() => {
+          // Check if SQL contains specific patterns to validate
+          // This makes the mock service more realistic
+          let mockSuccess = true;
+          let mockError = "";
+          
+          // First dry run - fail with specific colorInfo struct error
+          // Subsequent runs (after AI refinement) will succeed
+          if (sqlScript.includes("STRUCT(") && sqlScript.includes("colorInfo") && 
+              (sqlScript.includes("colorFamilies") || sqlScript.includes("colorFamily"))) {
+            
+            // Check if it's the initial SQL or already refined
+            const isRefined = (
+              sqlScript.includes("-- Default values for") || 
+              sqlScript.includes("ARRAY(SELECT CAST('Default") || 
+              sqlScript.includes("IFNULL(colors,") ||
+              localStorage.getItem('sqlRefined') === 'completed'
+            );
+            
+            if (sqlScript.includes("UNNEST(colorFamilies)") && !isRefined) {
+              // First-time run with the issue
+              mockSuccess = false;
+              mockError = "Mock Dry Run Error: Invalid field reference 'colorFamilies'. Field does not exist in source table 'psearch_raw.example_catalog'.";
+              localStorage.setItem('sqlRefined', 'pending');
+            } else {
+              // Already refined - SQL should be valid now
+              mockSuccess = true;
+              localStorage.setItem('sqlRefined', 'completed');
+            }
+          } else if (Math.random() > 0.95) { // Lower the chance of random errors to 5%
+            // Randomly fail some other SQL with generic error
+            mockSuccess = false;
+            mockError = "Mock Dry Run Error: Invalid syntax near 'SOME_COLUMN'. Check column names and types.";
+          }
+          
+          if (mockSuccess) {
+            console.log("Mock dry run successful.");
+            resolve({ valid: true, message: "SQL syntax validated successfully" });
+          } else {
+            console.error("Mock dry run failed:", mockError);
+            // Resolve with error structure, don't reject the promise itself for expected API failures
+            resolve({ valid: false, error: mockError });
+          }
+        }, 1200); // Simulate network delay
+      });
+    }
+
+    // Extract target dataset IDs from SQL script to ensure they exist
+    try {
+      // Use a regex to extract dataset references from CREATE TABLE statements
+      const createTablePattern = /CREATE\s+OR\s+REPLACE\s+TABLE\s+`([^`]*)`/i;
+      const match = createTablePattern.exec(sqlScript);
+      
+      if (match && match[1]) {
+        const tableRef = match[1];
+        
+        // Split the reference into its parts (project.dataset.table)
+        const parts = tableRef.split('.');
+        
+        // If we have at least dataset and table parts
+        if (parts.length >= 2) {
+          // For dataset.table format, we need to get the dataset part
+          let datasetId;
+          if (parts.length === 2) {
+            datasetId = parts[0]; // dataset.table format
+          } else if (parts.length === 3) {
+            datasetId = parts[1]; // project.dataset.table format
+          }
+          
+          if (datasetId) {
+            console.log(`Found dataset reference in SQL: ${datasetId}`);
+            try {
+              // Ensure the dataset exists before running the dry run
+              await sourceIngestionService.ensureDatasetExists(datasetId);
+              console.log(`Successfully ensured dataset ${datasetId} exists`);
+            } catch (datasetError) {
+              console.warn(`Failed to ensure dataset ${datasetId} exists, proceeding with dry run anyway:`, datasetError);
+              // Continue with the dry run even if this fails, as BigQuery will give a more specific error
+            }
+          }
+        }
+      }
+    } catch (parseError) {
+      console.warn("Error parsing SQL for dataset references:", parseError);
+      // Continue with the dry run even if parsing fails
+    }
+
+    // Real implementation using the actual BigQuery dry run endpoint
+    try {
+      console.log("Using real BigQuery dry run API");
+      
+      const response = await axios.post(`${INGESTION_SOURCE_URL}/dry-run-query`, {
+        sql_script: sqlScript,
+        max_timeout_seconds: 30  // 30 second timeout for dry run
+      }, { 
+        timeout: 35000 // Slightly longer axios timeout than the server-side timeout
+      });
+
+      console.log("Dry run response:", response.data);
+      
+      if (response.data.valid) {
+        return {
+          valid: true,
+          message: response.data.message || "SQL syntax validated successfully",
+          details: response.data.details || null
+        };
+      } else {
+        // Check if we have a "not found" error with dataset information
+        if (response.data.details?.error_type === "not_found" && response.data.details?.missing_dataset) {
+          const missingDataset = response.data.details.missing_dataset;
+          
+          try {
+            // Try to create the missing dataset and retry the dry run
+            console.log(`Attempting to create missing dataset: ${missingDataset}`);
+            await sourceIngestionService.ensureDatasetExists(missingDataset);
+            
+            // Retry the dry run
+            console.log("Retrying dry run after creating dataset");
+            return await sourceIngestionService.dryRunQuery(sqlScript);
+          } catch (createError) {
+            console.error(`Failed to create missing dataset ${missingDataset}:`, createError);
+            // Return the original error if we can't create the dataset
+            return {
+              valid: false,
+              error: response.data.error || "Unknown validation error from server",
+              details: response.data.details || null
+            };
+          }
+        } else {
+          // Return the error as-is for other types of errors
+          return {
+            valid: false,
+            error: response.data.error || "Unknown validation error from server",
+            details: response.data.details || null
+          };
+        }
+      }
+    } catch (error) {
+      console.error('Error performing dry run query:', error);
+      
+      // Provide more detailed error information
+      const errorMessage = error.response?.data?.error || 
+                          error.response?.data?.detail || 
+                          error.message || 
+                          "An unknown error occurred during the dry run.";
+      
+      return { 
+        valid: false, 
+        error: errorMessage,
+        details: error.response?.data?.details || null
+      };
+    }
   }
 };
 

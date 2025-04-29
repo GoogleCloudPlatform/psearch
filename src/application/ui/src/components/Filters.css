@@ -3,6 +3,9 @@
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
     width: 100%;
     background-color: #fff;
+    position: relative;
+    overflow-y: auto;
+    max-height: calc(100vh - 150px);
 }
 
 /* Hide the main title as it's handled by the parent component */

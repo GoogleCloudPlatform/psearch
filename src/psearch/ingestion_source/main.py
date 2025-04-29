@@ -33,10 +33,13 @@ from fastapi import (
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import uvicorn
+from google.cloud import bigquery
+from google.api_core.exceptions import BadRequest
 
 from .services.storage_service import StorageService
 from .services.schema_detection_service import SchemaDetectionService
 from .services.bigquery_service import BigQueryService
+from .services.dataset_service import DatasetService
 
 # Configure logging
 logging.basicConfig(
@@ -109,6 +112,20 @@ class JobStatusResponse(BaseModel):
     metadata: Optional[Dict[str, Any]] = None
 
 
+# New model for SQL dry run requests
+class DryRunRequest(BaseModel):
+    sql_script: str
+    max_timeout_seconds: Optional[int] = 30  # Optional timeout parameter
+
+
+# New model for SQL dry run responses
+class DryRunResponse(BaseModel):
+    valid: bool
+    message: Optional[str] = None
+    error: Optional[str] = None
+    details: Optional[Dict[str, Any]] = None
+
+
 # Initialize services
 def get_storage_service():
     project_id = os.environ.get("PROJECT_ID")
@@ -126,6 +143,13 @@ def get_bigquery_service():
     if not project_id:
         raise ValueError("PROJECT_ID environment variable is not set")
     return BigQueryService(project_id)
+
+
+def get_dataset_service():
+    project_id = os.environ.get("PROJECT_ID")
+    if not project_id:
+        raise ValueError("PROJECT_ID environment variable is not set")
+    return DatasetService(project_id)
 
 
 @app.get("/")
@@ -441,6 +465,139 @@ async def load_data(
         )
 
 
+@app.post("/dry-run-query", response_model=DryRunResponse)
+async def dry_run_query(
+    request: DryRunRequest,
+):
+    """
+    Perform a dry run of a SQL query to validate it without executing it.
+    This uses BigQuery's dry run functionality to check syntax and validity.
+    """
+    logger.info("Received SQL dry run request")
+    
+    # Validate input
+    if not request.sql_script:
+        raise HTTPException(
+            status_code=400, 
+            detail="SQL script is required"
+        )
+    
+    try:
+        # Get project ID from environment variable
+        project_id = os.environ.get("PROJECT_ID")
+        if not project_id:
+            raise ValueError("PROJECT_ID environment variable is not set")
+        
+        # Initialize BigQuery client
+        client = bigquery.Client(project=project_id)
+        
+        # Configure job for dry run
+        job_config = bigquery.QueryJobConfig(
+            dry_run=True,
+            use_query_cache=False
+        )
+        
+        # Use timeout parameter if provided
+        timeout_ms = request.max_timeout_seconds * 1000 if request.max_timeout_seconds else 30000
+        
+        # Start dry run
+        start_time = datetime.now()
+        query_job = client.query(
+            request.sql_script,
+            job_config=job_config,
+            timeout=timeout_ms
+        )
+        
+        # If we get here, the query is valid
+        execution_time = (datetime.now() - start_time).total_seconds()
+        
+        # Return success response with estimated bytes processed
+        return DryRunResponse(
+            valid=True,
+            message=f"SQL syntax validated successfully (Estimated bytes: {query_job.total_bytes_processed:,})",
+            details={
+                "estimated_bytes_processed": query_job.total_bytes_processed,
+                "execution_time_seconds": execution_time,
+            }
+        )
+        
+    except BadRequest as e:
+        # Handle BigQuery syntax and semantic errors
+        logger.error(f"SQL validation error: {str(e)}")
+        
+        # Process error message for better user feedback
+        error_message = str(e)
+        error_details = {}
+        
+        # Extract specific field names for field reference errors
+        missing_field = None
+        if "Invalid field reference" in error_message:
+            import re
+            field_match = re.search(r"Invalid field reference '([^']+)'", error_message)
+            if field_match:
+                missing_field = field_match.group(1)
+                error_details["missing_field"] = missing_field
+        
+        return DryRunResponse(
+            valid=False,
+            error=error_message,
+            details=error_details if error_details else None
+        )
+    
+    except bigquery.NotFound as e:
+        # Handle BigQuery not found errors (missing datasets, tables)
+        logger.error(f"BigQuery Not Found error: {str(e)}")
+        
+        error_message = str(e)
+        error_details = {"error_type": "not_found"}
+        
+        # Try to extract dataset and table information from the error
+        import re
+        
+        # Pattern for dataset not found
+        dataset_match = re.search(r"Dataset ([^.]+\.[^.]+) not found", error_message)
+        if dataset_match:
+            dataset_id = dataset_match.group(1)
+            error_details["missing_dataset"] = dataset_id
+            error_message = f"Dataset '{dataset_id}' not found. Please create this dataset before running the query."
+        
+        # Pattern for table not found
+        table_match = re.search(r"Table ([^.]+\.[^.]+\.[^.]+) not found", error_message)
+        if table_match:
+            table_id = table_match.group(1)
+            error_details["missing_table"] = table_id
+            error_message = f"Table '{table_id}' not found. Please ensure this table exists before running the query."
+        
+        logger.info(f"Enhanced NotFound error: {error_message}")
+        return DryRunResponse(
+            valid=False,
+            error=error_message,
+            details=error_details
+        )
+    
+    except Exception as e:
+        # Handle all other errors
+        logger.error(f"Error performing SQL dry run: {str(e)}", exc_info=True)
+        
+        # Format error message more user-friendly if possible
+        error_message = str(e)
+        error_type = type(e).__name__
+        
+        # Provide more descriptive error for common issues
+        if "Unable to create a client" in error_message or "Could not automatically determine" in error_message:
+            error_message = "Authentication error: Could not connect to Google Cloud. Please check your credentials and permissions."
+        elif "unexpected keyword argument" in error_message:
+            error_message = "Internal API error: The request format is invalid. Please report this issue."
+        elif "gateway timeout" in error_message.lower() or "deadline exceeded" in error_message.lower():
+            error_message = "The query validation timed out. Please try with a simpler query or increase the timeout."
+        
+        return DryRunResponse(
+            valid=False,
+            error=f"Error performing SQL validation: {error_message}",
+            details={"error_type": error_type}
+        )
+
+
 @app.get("/jobs/{job_id}", response_model=JobStatusResponse)
 async def get_job_status(job_id: str):
     """
@@ -477,6 +634,35 @@ async def list_jobs(
     )[:limit]
 
     return [JobStatusResponse(**job) for job in sorted_jobs]
+
+
+@app.post("/ensure-dataset", response_model=Dict[str, Any])
+async def ensure_dataset_exists(
+    request: DatasetRequest,
+    dataset_service: DatasetService = Depends(get_dataset_service),
+):
+    """
+    Ensures a BigQuery dataset exists, creating it if necessary.
+    This endpoint is useful before running SQL scripts that require specific datasets.
+    """
+    logger.info(f"Ensuring dataset exists: {request.dataset_id}")
+
+    try:
+        result = await dataset_service.ensure_dataset_exists(
+            dataset_id=request.dataset_id,
+            location=request.location,
+        )
+
+        return {
+            "dataset_id": request.dataset_id,
+            "location": result.get("location", request.location),
+            "created": result.get("created", False),
+            "message": result.get("message", "Dataset operation completed"),
+        }
+
+    except Exception as e:
+        logger.error(f"Error ensuring dataset exists: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Dataset operation failed: {str(e)}")
 
 
 @app.get("/buckets", response_model=List[Dict[str, Any]])

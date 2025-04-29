@@ -24,6 +24,7 @@ from .services.conversational_search_service import ConversationalSearchService
 from .services.enrichiment_service import EnrichmentService
 from .services.marketing_service import MarketingService
 from .services.imagen_service import ImageGenerationService
+from .services.sql_transformation_service import SQLTransformationService
 
 # Configure logging
 logging.basicConfig(
@@ -56,6 +57,7 @@ conversational_search_service = ConversationalSearchService(project_id, location
 enrichment_service = EnrichmentService(project_id, location)
 marketing_service = MarketingService(project_id, location)
 image_generation_service = ImageGenerationService(project_id, location)
+sql_transformation_service = SQLTransformationService(project_id, location)
 
 
 # Define request models
@@ -96,6 +98,12 @@ class EnhancedImageRequest(BaseModel):
     background_prompt: str
     person_description: Optional[str] = None
     style: Optional[str] = "photorealistic"
+
+
+class SQLGenerationRequest(BaseModel):
+    source_table: str
+    destination_table: str
+    destination_schema: Dict[str, Any]
 
 
 @app.get("/")
@@ -289,3 +297,64 @@ async def log_requests(request: Request, call_next):
     response = await call_next(request)
     logger.info(f"Response: {response.status_code}")
     return response
+
+
+@app.post("/generate-sql")
+async def generate_sql(request: SQLGenerationRequest):
+    """
+    Generate a SQL transformation script to map data from source to destination schema.
+    """
+    logger.info(f"Received SQL generation request: {request.source_table} -> {request.destination_table}")
+    
+    try:
+        # Generate the SQL transformation script
+        sql_script = sql_transformation_service.generate_sql_transformation(
+            source_table=request.source_table,
+            destination_table=request.destination_table,
+            destination_schema=request.destination_schema
+        )
+        
+        # Return the generated SQL script
+        return {
+            "sql_script": sql_script,
+            "source_table": request.source_table,
+            "destination_table": request.destination_table
+        }
+        
+    except Exception as e:
+        logger.error(f"Error generating SQL transformation: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/refine-sql")
+async def refine_sql(request: Dict[str, str]):
+    """
+    Refine an SQL script that has errors based on the error message.
+    """
+    logger.info("Received SQL refinement request")
+    
+    # Validate request
+    if "sql_script" not in request or "error_message" not in request:
+        raise HTTPException(status_code=400, detail="Request must include 'sql_script' and 'error_message'")
+        
+    try:
+        # Refine the SQL script
+        refined_sql = sql_transformation_service.refine_sql_script(
+            sql_script=request["sql_script"],
+            error_message=request["error_message"]
+        )
+        
+        # Return the refined SQL script
+        return {
+            "refined_sql_script": refined_sql
+        }
+        
+    except Exception as e:
+        logger.error(f"Error refining SQL script: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=8080)
