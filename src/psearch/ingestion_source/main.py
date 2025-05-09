@@ -126,6 +126,33 @@ class DryRunResponse(BaseModel):
     details: Optional[Dict[str, Any]] = None
 
 
+# New model for SQL fix attempt request
+class SQLFixAttemptRequest(BaseModel):
+    original_sql: str  # Original SQL with errors
+    current_sql: str   # Current version (may be a previous fix attempt)
+    error_message: str # Current error message
+    attempt_number: int = 1  # Track which attempt we're on
+    max_attempts: int = 3    # Maximum number of fix attempts allowed
+
+
+# New model for SQL fix response
+class SQLFixResponse(BaseModel):
+    original_sql: str         # The very first SQL that started the process
+    current_sql: str          # The SQL that was fixed in this attempt
+    suggested_sql: str        # The AI's suggested fix
+    diff: str                 # Human-readable diff between current and suggested
+    attempt_number: int       # Which attempt this is
+    valid: bool = False       # Whether the suggested fix is valid (dry run result)
+    message: Optional[str] = None  # Success message if valid
+    error: Optional[str] = None    # Error message if invalid
+
+
+# New model for apply SQL fix request
+class ApplySQLFixRequest(BaseModel):
+    sql_to_apply: str         # The SQL to validate (either AI suggestion or user modified)
+    attempt_number: int       # Track which attempt this is
+
+
 # Initialize services
 def get_storage_service():
     project_id = os.environ.get("PROJECT_ID")
@@ -150,6 +177,13 @@ def get_dataset_service():
     if not project_id:
         raise ValueError("PROJECT_ID environment variable is not set")
     return DatasetService(project_id)
+
+
+def get_sql_fix_service():
+    project_id = os.environ.get("PROJECT_ID")
+    if not project_id:
+        raise ValueError("PROJECT_ID environment variable is not set")
+    return SQLFixService(project_id)
 
 
 @app.get("/")
@@ -681,6 +715,8 @@ async def list_buckets(
     except Exception as e:
         logger.error(f"Error listing buckets: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error listing buckets: {str(e)}")
+
+
 
 
 def main():

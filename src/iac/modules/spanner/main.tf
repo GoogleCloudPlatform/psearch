@@ -42,7 +42,7 @@ resource "google_spanner_database" "products_db" {
   deletion_protection      = false
 
   ddl = [
-    "CREATE TABLE products (product_id INT64, product_data JSON, title STRING(MAX), title_tokens TOKENLIST AS (TOKENIZE_FULLTEXT(title)) HIDDEN, embedding ARRAY<FLOAT32>(vector_length=>768)) PRIMARY KEY(product_id)",
+    "CREATE TABLE products (product_id STRING(MAX), product_data JSON, title STRING(MAX), title_tokens TOKENLIST AS (TOKENIZE_FULLTEXT(title)) HIDDEN, embedding ARRAY<FLOAT32>(vector_length=>768)) PRIMARY KEY(product_id)",
     "CREATE SEARCH INDEX products_by_title ON products(title_tokens)",
     "CREATE VECTOR INDEX products_by_embedding ON products(embedding) WHERE embedding IS NOT NULL OPTIONS(distance_type=\"COSINE\", num_leaves=1000)"
   ]

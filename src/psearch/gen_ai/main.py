@@ -14,17 +14,20 @@
 # limitations under the License.
 
 import os
+import json
 import logging
-from fastapi import FastAPI, HTTPException, Request
+import re
+from fastapi import FastAPI, HTTPException, Request, Body
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import Dict, List, Any, Optional
+from pydantic import BaseModel, Field
+from typing import Dict, List, Any, Optional, Union
 
 from .services.conversational_search_service import ConversationalSearchService
-from .services.enrichiment_service import EnrichmentService
+from .services.enrichment_service import EnrichmentService
 from .services.marketing_service import MarketingService
 from .services.imagen_service import ImageGenerationService
 from .services.sql_transformation_service import SQLTransformationService
+from .services.sql_fix_service import SQLFixService
 
 # Configure logging
 logging.basicConfig(
@@ -35,8 +38,24 @@ logger = logging.getLogger(__name__)
 # Initialize FastAPI app
 app = FastAPI(
     title="Gen AI Service",
-    description="API for AI-powered product enhancements",
+    description="API for AI-powered product enhancements with conversational search, content generation, and SQL transformation capabilities",
     version="1.0.0",
+    openapi_tags=[
+        {"name": "General", "description": "Basic health and status endpoints"},
+        {"name": "Search", "description": "Conversational product search endpoints"},
+        {"name": "Enrichment", "description": "Product data enrichment endpoints"},
+        {"name": "Marketing", "description": "Marketing content generation endpoints"},
+        {"name": "SQL", "description": "SQL transformation and optimization endpoints"},
+        {"name": "Images", "description": "Image generation and enhancement endpoints"},
+    ],
+    contact={
+        "name": "PSearch Development Team",
+        "email": "psearch-dev@example.com",
+    },
+    license_info={
+        "name": "Apache 2.0",
+        "url": "https://www.apache.org/licenses/LICENSE-2.0.html",
+    },
 )
 
 # Add CORS middleware
@@ -58,6 +77,7 @@ enrichment_service = EnrichmentService(project_id, location)
 marketing_service = MarketingService(project_id, location)
 image_generation_service = ImageGenerationService(project_id, location)
 sql_transformation_service = SQLTransformationService(project_id, location)
+sql_fix_service = SQLFixService(project_id, location)
 
 
 # Define request models
@@ -101,22 +121,140 @@ class EnhancedImageRequest(BaseModel):
 
 
 class SQLGenerationRequest(BaseModel):
-    source_table: str
-    destination_table: str
-    destination_schema: Dict[str, Any]
+    source_table: str = Field(
+        ..., 
+        description="The source BigQuery table ID (e.g., project.dataset.table)",
+        example="psearch-dev-ze.raw_data.product_catalog"
+    )
+    destination_table: str = Field(
+        ..., 
+        description="The destination BigQuery table ID (e.g., project.dataset.table)",
+        example="psearch-dev-ze.processed_data.products"
+    )
+    destination_schema: Dict[str, Any] = Field(
+        ..., 
+        description="JSON schema definition for the destination table structure"
+    )
+    
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "source_table": "psearch-dev-ze.raw_data.product_catalog",
+                "destination_table": "psearch-dev-ze.processed_data.products",
+                "destination_schema": {
+                    "fields": [
+                        {"name": "id", "type": "STRING", "mode": "REQUIRED"},
+                        {"name": "name", "type": "STRING", "mode": "REQUIRED"},
+                        {"name": "description", "type": "STRING", "mode": "NULLABLE"}
+                    ]
+                }
+            }
+        }
+    }
+
+# SQL Validation models
+class SQLValidationRequest(BaseModel):
+    sql_script: str = Field(
+        ..., 
+        description="SQL script to validate",
+        example="CREATE OR REPLACE TABLE `project.dataset.table` AS SELECT * FROM `source.table`"
+    )
+    timeout_seconds: Optional[int] = Field(
+        30, 
+        description="Timeout in seconds for validation",
+        example=30,
+        gt=0,
+        le=300
+    )
+    
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "sql_script": "CREATE OR REPLACE TABLE `psearch-dev-ze.processed_data.products` AS\nSELECT id, name, description FROM `psearch-dev-ze.raw_data.catalog`;",
+                "timeout_seconds": 30
+            }
+        }
+    }
+
+# SQL Fix models
+class SQLFixRequest(BaseModel):
+    original_sql: str = Field(
+        ..., 
+        description="Original SQL that started the fix process",
+        example="CREATE OR REPLACE TABLE `project.dataset.table` AS SELECT * FROM `source.table`"
+    )
+    current_sql: str = Field(
+        ..., 
+        description="Current SQL version (might be a previous fix attempt)",
+        example="CREATE OR REPLACE TABLE `project.dataset.table` AS SELECT id, colorFamily FROM `source.table`"
+    )
+    error_message: str = Field(
+        ..., 
+        description="Error message from failed validation",
+        example="Invalid field reference 'colorFamily'"
+    )
+    attempt_number: Optional[int] = Field(
+        1, 
+        description="Current attempt number for tracking multiple fix attempts",
+        example=1,
+        ge=1
+    )
+    
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "original_sql": "CREATE OR REPLACE TABLE `products` AS\nSELECT id, colorFamily FROM `raw_catalog`;",
+                "current_sql": "CREATE OR REPLACE TABLE `products` AS\nSELECT id, colorFamily FROM `raw_catalog`;",
+                "error_message": "Invalid field reference 'colorFamily'",
+                "attempt_number": 1
+            }
+        }
+    }
+
+class SQLFixResponse(BaseModel):
+    success: bool = Field(
+        ..., 
+        description="Whether the fix generation was successful",
+        example=True
+    )
+    suggested_sql: Optional[str] = Field(
+        None, 
+        description="The suggested fixed SQL script",
+        example="CREATE OR REPLACE TABLE `project.dataset.table` AS SELECT id, NULL AS colorFamily FROM `source.table`"
+    )
+    diff: Optional[str] = Field(
+        None, 
+        description="Unified diff showing the changes between current and suggested SQL",
+        example="--- current.sql\n+++ suggested.sql\n@@ -1,5 +1,5 @@\nCREATE OR REPLACE TABLE...\n-colorFamily\n+NULL AS colorFamily"
+    )
+    error: Optional[str] = Field(
+        None, 
+        description="Error message if fix generation failed",
+        example="Failed to generate SQL fix: Model error"
+    )
+    
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "success": True,
+                "suggested_sql": "CREATE OR REPLACE TABLE `products` AS\nSELECT id, NULL AS colorFamily FROM `raw_catalog`;",
+                "diff": "--- current.sql\n+++ suggested.sql\n@@ -1,5 +1,5 @@\nCREATE OR REPLACE TABLE `products` AS\nSELECT id, \n-colorFamily \n+NULL AS colorFamily \nFROM `raw_catalog`;"
+            }
+        }
+    }
 
 
-@app.get("/")
+@app.get("/", tags=["General"])
 async def root():
     return {"message": "Gen AI Service is running"}
 
 
-@app.get("/health")
+@app.get("/health", tags=["General"])
 async def health_check():
     return {"status": "healthy"}
 
 
-@app.post("/conversational-search")
+@app.post("/conversational-search", tags=["Search"])
 async def conversational_search(request: ConversationalSearchRequest):
     """
     Process a conversational search query and return relevant results
@@ -160,7 +298,7 @@ async def conversational_search(request: ConversationalSearchRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/enrichment")
+@app.post("/enrichment", tags=["Enrichment"])
 async def enrichment(request: EnrichmentRequest):
     """
     Enrich product data with AI-generated content
@@ -209,7 +347,7 @@ async def enrichment(request: EnrichmentRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/marketing")
+@app.post("/marketing", tags=["Marketing"])
 async def marketing(request: MarketingRequest):
     """
     Generate marketing content for a product
@@ -248,7 +386,7 @@ async def marketing(request: MarketingRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/generate-enhanced-image")
+@app.post("/generate-enhanced-image", tags=["Images"])
 async def generate_enhanced_image(request: EnhancedImageRequest):
     """
     Generate an enhanced image using Gemini, changing background or adding a person.
@@ -299,7 +437,13 @@ async def log_requests(request: Request, call_next):
     return response
 
 
-@app.post("/generate-sql")
+@app.post(
+    "/generate-sql",
+    tags=["SQL"],
+    summary="Generate SQL transformation script",
+    description="Generates a SQL transformation script to map data from a source table to a destination schema",
+    response_model=Dict[str, str]
+)
 async def generate_sql(request: SQLGenerationRequest):
     """
     Generate a SQL transformation script to map data from source to destination schema.
@@ -326,7 +470,13 @@ async def generate_sql(request: SQLGenerationRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/refine-sql")
+@app.post(
+    "/refine-sql",
+    tags=["SQL"],
+    summary="Refine SQL script with errors",
+    description="Refines an SQL script that has errors based on the error message",
+    response_model=Dict[str, str]
+)
 async def refine_sql(request: Dict[str, str]):
     """
     Refine an SQL script that has errors based on the error message.
@@ -353,6 +503,201 @@ async def refine_sql(request: Dict[str, str]):
         logger.error(f"Error refining SQL script: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@app.post(
+    "/sql/validate",
+    tags=["SQL"],
+    summary="Validate SQL script",
+    description="Performs a dry run validation of a SQL script without executing it",
+    response_model=Dict[str, Any],
+    responses={
+        200: {
+            "description": "Validation result",
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "success": {
+                            "summary": "Valid SQL",
+                            "value": {
+                                "valid": True,
+                                "message": "SQL syntax validated successfully (Estimated bytes: 1,024)",
+                                "details": {
+                                    "estimated_bytes_processed": 1024
+                                }
+                            }
+                        },
+                        "error": {
+                            "summary": "Invalid SQL",
+                            "value": {
+                                "valid": False,
+                                "error": "Invalid field reference 'missing_field'",
+                                "details": {
+                                    "missing_field": "missing_field"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        500: {
+            "description": "Server error",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": "Error performing SQL validation"
+                    }
+                }
+            }
+        }
+    }
+)
+async def validate_sql(request: SQLValidationRequest):
+    """
+    Validate a SQL script with a BigQuery dry run.
+    
+    - Checks syntax and semantics without executing the query
+    - Estimates the bytes that would be processed
+    - Identifies missing fields and other common errors
+    
+    Returns a validation result with status and details.
+    """
+    logger.info(f"Validating SQL script ({len(request.sql_script)} chars)")
+    
+    try:
+        # Validate the SQL
+        validation_result = sql_fix_service.validate_sql(
+            request.sql_script,
+            request.timeout_seconds
+        )
+        
+        return validation_result
+    
+    except Exception as e:
+        logger.error(f"Error validating SQL: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post(
+    "/sql/fix",
+    tags=["SQL"],
+    summary="Generate SQL fix",
+    description="Generates a fixed SQL script using AI based on error message",
+    response_model=SQLFixResponse,
+    responses={
+        200: {
+            "description": "Generated SQL fix",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "success": True,
+                        "suggested_sql": "CREATE OR REPLACE TABLE `products` AS\nSELECT id, NULL AS colorFamily FROM `raw_catalog`;",
+                        "diff": "--- current.sql\n+++ suggested.sql\n@@ -1,5 +1,5 @@\nCREATE OR REPLACE TABLE `products` AS\nSELECT id, \n-colorFamily \n+NULL AS colorFamily \nFROM `raw_catalog`;"
+                    }
+                }
+            }
+        },
+        400: {
+            "description": "Invalid request",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": "Missing SQL or error message to generate a fix"
+                    }
+                }
+            }
+        },
+        500: {
+            "description": "Server error",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": "Error generating SQL fix"
+                    }
+                }
+            }
+        }
+    }
+)
+async def fix_sql(request: SQLFixRequest):
+    """
+    Generate a fixed SQL script based on an error message.
+    
+    - Uses AI to analyze the error and suggest fixes
+    - Returns the suggested SQL with a diff showing changes
+    - Can handle common errors like missing fields, syntax issues, etc.
+    
+    Returns the suggested SQL script and a diff showing the changes.
+    """
+    logger.info(f"Generating SQL fix for error: {request.error_message[:100]}...")
+    
+    try:
+        # Generate the fix
+        fix_result = sql_fix_service.generate_sql_fix(
+            request.original_sql,
+            request.current_sql,
+            request.error_message
+        )
+        
+        return fix_result
+    
+    except Exception as e:
+        logger.error(f"Error generating SQL fix: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post(
+    "/sql/analyze",
+    tags=["SQL"],
+    summary="Analyze SQL differences",
+    description="Analyzes and explains differences between original and fixed SQL",
+    response_model=Dict[str, Any],
+    responses={
+        200: {
+            "description": "Analysis of SQL differences",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "diff": "--- current.sql\n+++ fixed.sql\n@@ -1,5 +1,5 @@\n...",
+                        "changes": ["Modified field reference: colorFamily -> NULL AS colorFamily"],
+                        "removed_lines_count": 1,
+                        "added_lines_count": 1
+                    }
+                }
+            }
+        },
+        500: {
+            "description": "Server error",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": "Error analyzing SQL differences"
+                    }
+                }
+            }
+        }
+    }
+)
+async def analyze_sql_diff(
+    original_sql: str = Body(..., description="Original SQL with errors", example="CREATE OR REPLACE TABLE `products` AS\nSELECT id, colorFamily FROM `raw_catalog`;"),
+    fixed_sql: str = Body(..., description="Fixed SQL script", example="CREATE OR REPLACE TABLE `products` AS\nSELECT id, NULL AS colorFamily FROM `raw_catalog`;")
+):
+    """
+    Analyze and explain the differences between original and fixed SQL.
+    
+    - Provides a detailed analysis of what was changed and why
+    - Identifies key changes like field replacements or removals
+    - Includes a diff showing exact changes
+    
+    Returns analysis details including a list of significant changes.
+    """
+    logger.info("Analyzing SQL differences")
+    
+    try:
+        analysis = sql_fix_service.analyze_differences(original_sql, fixed_sql)
+        return analysis
+    
+    except Exception as e:
+        logger.error(f"Error analyzing SQL differences: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn

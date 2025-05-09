@@ -5,4 +5,5 @@ pydantic>=2.0.0
 requests>=2.31.0
 python-dotenv>=1.0.0
 google-cloud-storage>=2.13.0
+google-cloud-bigquery>=3.11.0
 pillow>=10.0.0

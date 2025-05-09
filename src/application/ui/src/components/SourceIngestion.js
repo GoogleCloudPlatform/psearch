@@ -56,7 +56,8 @@ import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import ErrorIcon from '@mui/icons-material/Error';
 import StorageIcon from '@mui/icons-material/Storage';
 import CodeIcon from '@mui/icons-material/Code'; // Moved from @mui/material
-import ContentCopyIcon from '@mui/icons-material/ContentCopy'; // Moved from @mui/material
+import ContentCopyIcon from '@mui/icons-material/ContentCopy';
+import SqlErrorFix from './SqlErrorFix'; // Import our new component
 import TableChartIcon from '@mui/icons-material/TableChart';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import RestartAltIcon from '@mui/icons-material/RestartAlt';
@@ -111,6 +112,7 @@ const SourceIngestion = () => {
   const [dryRunError, setDryRunError] = useState(null);
   const [dryRunSuccess, setDryRunSuccess] = useState(false);
   const [isRefiningSql, setIsRefiningSql] = useState(false);
+  const [sqlFixAttemptNumber, setSqlFixAttemptNumber] = useState(1); // Add state for SQL fix attempt tracking
   // const [generationPrompt, setGenerationPrompt] = useState(''); // Add if prompt becomes dynamic/editable later
   
   // Refs
@@ -1227,68 +1229,83 @@ const SourceIngestion = () => {
 
       // --- Step 5: Dry Run & Refine SQL ---
       case 5:
-         return (
-           <Box sx={{ mt: 2 }}>
-             <Typography variant="h6" gutterBottom>
-               Dry Run & Refine SQL
-             </Typography>
-             <Typography variant="body2" color="text.secondary" paragraph>
-               Validate the generated SQL script with a BigQuery dry run. If errors occur, use AI to refine the script.
-             </Typography>
+        // Handler for when SQL is fixed by the component
+        const handleSqlFixed = (fixedSql, validationResult) => {
+          // Update the generated SQL with the fixed version
+          setGeneratedSql(fixedSql);
+          
+          // Mark the dry run as successful
+          setDryRunSuccess(true);
+          
+          // Clear any existing errors
+          setDryRunError(null);
+          setSqlGenerationError(null);
+          
+          // Show success message
+          setSuccess("SQL fix successfully validated! The SQL is now ready to use.");
+        };
+        
+        return (
+          <Box sx={{ mt: 2 }}>
+            <Typography variant="h6" gutterBottom>
+              Dry Run & Refine SQL
+            </Typography>
+            <Typography variant="body2" color="text.secondary" paragraph>
+              Validate the generated SQL script with a BigQuery dry run. If errors occur, use AI to refine the script.
+            </Typography>
 
-             {generatedSql ? (
-               <Card variant="outlined" sx={{ mb: 2 }}>
-                 <CardContent>
+            {generatedSql ? (
+              <>
+                <Card variant="outlined" sx={{ mb: 2 }}>
+                  <CardContent>
                     <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }}>
-                       <Typography variant="subtitle1">SQL Script to Validate</Typography>
-                       <Tooltip title="Copy SQL to clipboard">
-                          <IconButton onClick={() => navigator.clipboard.writeText(generatedSql)} size="small">
-                              <ContentCopyIcon fontSize="small" />
-                          </IconButton>
-                       </Tooltip>
+                      <Typography variant="subtitle1">SQL Script to Validate</Typography>
+                      <Tooltip title="Copy SQL to clipboard">
+                        <IconButton onClick={() => navigator.clipboard.writeText(generatedSql)} size="small">
+                          <ContentCopyIcon fontSize="small" />
+                        </IconButton>
+                      </Tooltip>
                     </Stack>
-                   <Paper variant="outlined" sx={{ p: 2, maxHeight: '300px', overflowY: 'auto', backgroundColor: '#f5f5f5', mb: 2 }}>
-                     <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordWrap: 'break-word' }}>
-                       <code>{generatedSql}</code>
-                     </pre>
-                   </Paper>
-                   
-                   <Stack direction="row" spacing={2}>
+                    <Paper variant="outlined" sx={{ p: 2, maxHeight: '300px', overflowY: 'auto', backgroundColor: '#f5f5f5', mb: 2 }}>
+                      <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordWrap: 'break-word' }}>
+                        <code>{generatedSql}</code>
+                      </pre>
+                    </Paper>
+                    
+                    {/* Show dry run button if we haven't run it yet */}
+                    {!dryRunError && !dryRunSuccess && (
                       <Button
                         variant="contained"
                         color="primary"
                         onClick={handleDryRunSql}
-                        disabled={isDryRunning || dryRunSuccess} // Disable if running or already successful
+                        disabled={isDryRunning}
                         startIcon={isDryRunning ? <CircularProgress size={20} color="inherit" /> : <VisibilityIcon />}
                       >
-                        {isDryRunning ? 'Dry Running...' : (dryRunSuccess ? 'Dry Run Successful' : 'Run Dry Run')}
+                        {isDryRunning ? 'Validating...' : 'Validate SQL'}
                       </Button>
-                      
-                      {/* Only show Refine button if there was a dry run error */}
-                      {dryRunError && (
-                          <Button
-                            variant="outlined"
-                            color="secondary"
-                            onClick={handleRefineSql}
-                            disabled={isRefiningSql}
-                            startIcon={isRefiningSql ? <CircularProgress size={20} color="inherit" /> : <EditIcon />}
-                          >
-                            {isRefiningSql ? 'Refining...' : 'Refine SQL with AI'}
-                          </Button>
-                      )}
-                   </Stack>
-                   
-                   {dryRunError && <Alert severity="error" sx={{ mt: 2 }}><strong>Dry Run Failed:</strong> {dryRunError}</Alert>}
-                   {dryRunSuccess && <Alert severity="success" sx={{ mt: 2 }}>Dry Run Successful! The SQL syntax is valid.</Alert>}
-                   {sqlGenerationError && <Alert severity="error" sx={{ mt: 2 }}><strong>Refinement Error:</strong> {sqlGenerationError}</Alert>} 
-
-                 </CardContent>
-               </Card>
-             ) : (
-               <Alert severity="warning">No SQL script generated yet. Go back to the previous step.</Alert>
-             )}
-           </Box>
-         );
+                    )}
+                    
+                    {dryRunSuccess && <Alert severity="success" sx={{ mt: 2 }}>Dry Run Successful! The SQL syntax is valid.</Alert>}
+                  </CardContent>
+                </Card>
+                
+                {/* Only show the SQL Error Fix component if there was an error */}
+                {dryRunError && (
+                  <SqlErrorFix
+                    originalSql={generatedSql} // The first SQL version
+                    currentSql={generatedSql}  // The current SQL (may be refined in future attempts)
+                    errorMessage={dryRunError}
+                    onSqlFixed={handleSqlFixed}
+                    attemptNumber={sqlFixAttemptNumber}
+                    maxAttempts={3}
+                  />
+                )}
+              </>
+            ) : (
+              <Alert severity="warning">No SQL script generated yet. Go back to the previous step.</Alert>
+            )}
+          </Box>
+        );
 
       default:
         return <Typography>Unknown step</Typography>;

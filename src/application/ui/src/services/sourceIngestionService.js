@@ -16,6 +16,7 @@
 
 import axios from 'axios';
 import config from '../config';
+import * as genAiService from './genAiService';
 
 // Base URL for the Source Ingestion API - direct to the port since we're running the backend directly
 const INGESTION_SOURCE_URL = config.ingestionSourceUrl;
@@ -362,6 +363,97 @@ export const sourceIngestionService = {
    *                            Example success: { valid: true, message: "SQL syntax validated successfully" }
    *                            Example error: { valid: false, error: "Error message..." }
    */
+  // Generate a SQL fix using the new integrated AI-powered fix service
+  generateSqlFix: async (originalSql, currentSql, errorMessage, attemptNumber = 1) => {
+    if (sourceIngestionService.useMockMode()) {
+      console.log("Using mock SQL fix for validation errors");
+      
+      return new Promise((resolve) => {
+        setTimeout(() => {
+          // Simulated diff showing what would be changed
+          let diff = `--- current.sql\n+++ suggested.sql\n@@ -2,7 +2,7 @@\n SELECT\n   SAFE_CAST(source.id AS STRING) AS id,\n   SAFE_CAST(source.name AS STRING) AS name,\n-  SAFE_CAST(source.title AS STRING) AS title,\n+  /* Field 'title' not in source - using NULL */ NULL AS title,\n   IFNULL(source.brands, []) AS brands,`;
+          
+          // For the colorFamilies error, create a more specific mock response
+          if (errorMessage.includes("colorFamilies")) {
+            diff = `--- current.sql\n+++ suggested.sql\n@@ -7,8 +7,8 @@\n   IF(source.colorInfo IS NULL,\n     NULL,\n     STRUCT(\n-      ARRAY(SELECT CAST(colorFamily AS STRING) FROM UNNEST(colorFamilies) AS colorFamily) AS colorFamilies,\n-      ARRAY(SELECT CAST(color AS STRING) FROM UNNEST(colors) AS color) AS colors\n+      -- Default values for colorFamilies which doesn't exist in source\n+      ARRAY(SELECT CAST('Default Color' AS STRING)) AS colorFamilies\n     )\n   ) AS colorInfo,`;
+            
+            // Create a more sophisticated fix for the specific error
+            const suggestedSql = currentSql.replace(
+              /ARRAY\(SELECT CAST\(colorFamily AS STRING\) FROM UNNEST\(colorFamilies\) AS colorFamily\) AS colorFamilies/,
+              "-- Default values for colorFamilies which doesn't exist in source\n      ARRAY(SELECT CAST('Default Color' AS STRING)) AS colorFamilies"
+            );
+            
+            resolve({
+              original_sql: originalSql,
+              current_sql: currentSql,
+              suggested_sql: suggestedSql,
+              diff: diff,
+              attempt_number: attemptNumber,
+              valid: true, // Mock pretends the fix will be valid
+              message: "AI-suggested fix should resolve the missing colorFamilies field"
+            });
+          } else {
+            // Generic mock response for other errors
+            const suggestedSql = currentSql.replace(
+              /SAFE_CAST\(source\.title AS STRING\) AS title/,
+              "/* Field 'title' not in source - using NULL */ NULL AS title"
+            );
+            
+            resolve({
+              original_sql: originalSql,
+              current_sql: currentSql,
+              suggested_sql: suggestedSql,
+              diff: diff,
+              attempt_number: attemptNumber,
+              valid: Math.random() > 0.3, // 70% chance the mock fix is valid
+              message: Math.random() > 0.3 ? "SQL fix appears to be valid" : null,
+              error: Math.random() > 0.3 ? null : "Mock error: The fix might need further refinement"
+            });
+          }
+        }, 1500); // Simulate network delay
+      });
+    }
+    
+    // Real implementation using the genAiService
+    return await genAiService.generateSqlFix(originalSql, currentSql, errorMessage, attemptNumber);
+  },
+  
+  // Validate a fixed SQL query
+  validateSqlFix: async (sqlToApply, attemptNumber = 1) => {
+    if (sourceIngestionService.useMockMode()) {
+      console.log("Using mock validate SQL fix");
+      
+      return new Promise((resolve) => {
+        setTimeout(() => {
+          // 80% chance of success in mock mode
+          const isValid = Math.random() > 0.2; 
+          
+          if (isValid) {
+            resolve({
+              valid: true,
+              message: "SQL syntax validated successfully (Mock)",
+              details: {
+                estimated_bytes_processed: 1024 * 1024 * 5 // 5MB mock estimate
+              }
+            });
+          } else {
+            resolve({
+              valid: false,
+              error: "Mock error: Still having issues with the SQL syntax near line 10.",
+              details: {
+                error_type: "syntax_error",
+                line_number: 10
+              }
+            });
+          }
+        }, 800); // Faster response for validation
+      });
+    }
+    
+    // Real implementation using the genAiService
+    return await genAiService.validateSqlFix(sqlToApply, attemptNumber);
+  },
+  
   dryRunQuery: async (sqlScript) => {
     // Check if we should use mock mode
     if (sourceIngestionService.useMockMode()) {
@@ -411,7 +503,7 @@ export const sourceIngestionService = {
             resolve({ valid: true, message: "SQL syntax validated successfully" });
           } else {
             console.error("Mock dry run failed:", mockError);
-            // Resolve with error structure, don't reject the promise itself for expected API failures
+            // Resolve with error structure, don't reject the promise for expected API failures
             resolve({ valid: false, error: mockError });
           }
         }, 1200); // Simulate network delay
