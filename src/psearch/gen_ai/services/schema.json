@@ -1,0 +1,335 @@
+[
+  {
+    "name": "name",
+    "mode": "NULLABLE",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "id",
+    "mode": "NULLABLE",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "type",
+    "mode": "NULLABLE",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "primaryProductId",
+    "mode": "NULLABLE",
+    "type": "INTEGER",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "collectionMemberIds",
+    "mode": "REPEATED",
+    "type": "INTEGER",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "gtin",
+    "mode": "NULLABLE",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "categories",
+    "mode": "REPEATED",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "title",
+    "mode": "NULLABLE",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "brands",
+    "mode": "REPEATED",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "description",
+    "mode": "NULLABLE",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "languageCode",
+    "mode": "NULLABLE",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "attributes",
+    "mode": "REPEATED",
+    "type": "RECORD",
+    "description": "",
+    "fields": [
+      {
+        "name": "key",
+        "mode": "",
+        "type": "STRING",
+        "description": "",
+        "fields": []
+      },
+      {
+        "name": "value",
+        "mode": "",
+        "type": "RECORD",
+        "description": "",
+        "fields": [
+          {
+            "name": "text",
+            "mode": "REPEATED",
+            "type": "STRING",
+            "description": "",
+            "fields": []
+          },
+          {
+            "name": "numbers",
+            "mode": "REPEATED",
+            "type": "INTEGER",
+            "description": "",
+            "fields": []
+          },
+          {
+            "name": "searchable",
+            "mode": "",
+            "type": "BOOLEAN",
+            "description": "",
+            "fields": []
+          },
+          {
+            "name": "indexable",
+            "mode": "",
+            "type": "BOOLEAN",
+            "description": "",
+            "fields": []
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "tags",
+    "mode": "REPEATED",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "priceInfo",
+    "mode": "NULLABLE",
+    "type": "RECORD",
+    "description": "",
+    "fields": [
+      {
+        "name": "currencyCode",
+        "mode": "",
+        "type": "STRING",
+        "description": "",
+        "fields": []
+      },
+      {
+        "name": "price",
+        "mode": "",
+        "type": "FLOAT",
+        "description": "",
+        "fields": []
+      },
+      {
+        "name": "originalPrice",
+        "mode": "",
+        "type": "INTEGER",
+        "description": "",
+        "fields": []
+      },
+      {
+        "name": "cost",
+        "mode": "",
+        "type": "FLOAT",
+        "description": "",
+        "fields": []
+      },
+      {
+        "name": "priceEffectiveTime",
+        "mode": "",
+        "type": "STRING",
+        "description": "",
+        "fields": []
+      },
+      {
+        "name": "priceExpireTime",
+        "mode": "",
+        "type": "INTEGER",
+        "description": "",
+        "fields": []
+      }
+    ]
+  },
+  {
+    "name": "rating",
+    "mode": "NULLABLE",
+    "type": "INTEGER",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "expireTime",
+    "mode": "NULLABLE",
+    "type": "INTEGER",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "ttl",
+    "mode": "NULLABLE",
+    "type": "INTEGER",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "availableTime",
+    "mode": "NULLABLE",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "availability",
+    "mode": "NULLABLE",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "availableQuantity",
+    "mode": "NULLABLE",
+    "type": "INTEGER",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "fulfillmentInfo",
+    "mode": "REPEATED",
+    "type": "INTEGER",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "uri",
+    "mode": "NULLABLE",
+    "type": "INTEGER",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "images",
+    "mode": "REPEATED",
+    "type": "RECORD",
+    "description": "",
+    "fields": [
+      {
+        "name": "uri",
+        "mode": "",
+        "type": "STRING",
+        "description": "",
+        "fields": []
+      },
+      {
+        "name": "height",
+        "mode": "",
+        "type": "INTEGER",
+        "description": "",
+        "fields": []
+      },
+      {
+        "name": "width",
+        "mode": "",
+        "type": "INTEGER",
+        "description": "",
+        "fields": []
+      }
+    ]
+  },
+  {
+    "name": "audience",
+    "mode": "NULLABLE",
+    "type": "INTEGER",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "colorInfo",
+    "mode": "NULLABLE",
+    "type": "INTEGER",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "sizes",
+    "mode": "REPEATED",
+    "type": "INTEGER",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "materials",
+    "mode": "REPEATED",
+    "type": "INTEGER",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "patterns",
+    "mode": "REPEATED",
+    "type": "INTEGER",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "conditions",
+    "mode": "REPEATED",
+    "type": "INTEGER",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "retrievableFields",
+    "mode": "NULLABLE",
+    "type": "INTEGER",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "publishTime",
+    "mode": "NULLABLE",
+    "type": "STRING",
+    "description": "",
+    "fields": []
+  },
+  {
+    "name": "promotions",
+    "mode": "REPEATED",
+    "type": "INTEGER",
+    "description": "",
+    "fields": []
+  }
+]

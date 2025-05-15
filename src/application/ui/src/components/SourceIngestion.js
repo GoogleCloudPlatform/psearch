@@ -62,6 +62,7 @@ import TableChartIcon from '@mui/icons-material/TableChart';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import RestartAltIcon from '@mui/icons-material/RestartAlt';
 import VisibilityIcon from '@mui/icons-material/Visibility';
+import OpenInNewIcon from '@mui/icons-material/OpenInNew'; // For BigQuery Studio link
 import InfoIcon from '@mui/icons-material/Info';
 import DeleteIcon from '@mui/icons-material/Delete';
 import EditIcon from '@mui/icons-material/Edit';
@@ -613,13 +614,17 @@ const SourceIngestion = () => {
     const sourceTable = `${datasetId}.${tableId}`;
     const destinationTable = `products_psearch.psearch`; // Target Dataset.Table format
 
+    // Extract field names from the schema to pass to the SQL generator
+    const sourceSchemaFields = schema.map(field => field.name);
     console.log("Requesting SQL generation for:", sourceTable, "->", destinationTable);
+    console.log("Using source schema fields:", sourceSchemaFields);
 
     try {
       // The genAiService now handles SQL normalization internally
       const sqlScript = await generateTransformationSql(
         sourceTable,
-        destinationTable
+        destinationTable,
+        sourceSchemaFields // Pass the schema field names
       );
       
       console.log("SQL script received:", sqlScript.substring(0, 100) + "...");
@@ -1272,22 +1277,47 @@ const SourceIngestion = () => {
                       </pre>
                     </Paper>
                     
-                    {/* Show dry run button if we haven't run it yet */}
-                    {!dryRunError && !dryRunSuccess && (
-                      <Button
-                        variant="contained"
-                        color="primary"
-                        onClick={handleDryRunSql}
-                        disabled={isDryRunning}
-                        startIcon={isDryRunning ? <CircularProgress size={20} color="inherit" /> : <VisibilityIcon />}
-                      >
-                        {isDryRunning ? 'Validating...' : 'Validate SQL'}
-                      </Button>
-                    )}
+                    <Stack direction="row" spacing={1} sx={{ mt: 2 }}>
+                      {/* Show dry run button if we haven't run it yet OR if it previously failed and isn't currently running */}
+                      {(!dryRunSuccess || dryRunError) && (
+                        <Button
+                          variant="contained"
+                          color="primary"
+                          onClick={handleDryRunSql}
+                          disabled={isDryRunning}
+                          startIcon={isDryRunning ? <CircularProgress size={20} color="inherit" /> : <VisibilityIcon />}
+                        >
+                          {isDryRunning ? 'Validating...' : (dryRunError ? 'Retry Validation' : 'Validate SQL')}
+                        </Button>
+                      )}
+
+                      {generatedSql && (
+                        <Button
+                          variant="outlined"
+                          color="secondary"
+                          startIcon={<OpenInNewIcon />}
+                          onClick={() => {
+                            const projectId = config.projectId;
+                            const encodedSql = encodeURIComponent(generatedSql);
+                            const bqUrl = `https://console.cloud.google.com/bigquery?sq=${encodedSql}&project=${projectId}`;
+                            window.open(bqUrl, '_blank');
+                          }}
+                          disabled={!generatedSql}
+                        >
+                          Open in BigQuery Studio
+                        </Button>
+                      )}
+                    </Stack>
                     
                     {dryRunSuccess && <Alert severity="success" sx={{ mt: 2 }}>Dry Run Successful! The SQL syntax is valid.</Alert>}
                   </CardContent>
                 </Card>
+                
+                <Alert severity="info" sx={{ mt: 2, mb: 2 }}>
+                  Ensure the destination dataset <strong>products_psearch</strong> exists in your BigQuery project: <code>{config.projectId}</code>.
+                  If not, please create it before running the query in BigQuery Studio.
+                  You can use the command: <code>gcloud bq mk --dataset {config.projectId}:products_psearch</code>
+                </Alert>
                 
                 {/* Only show the SQL Error Fix component if there was an error */}
                 {dryRunError && (

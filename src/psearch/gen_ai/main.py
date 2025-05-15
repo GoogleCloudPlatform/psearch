@@ -131,9 +131,14 @@ class SQLGenerationRequest(BaseModel):
         description="The destination BigQuery table ID (e.g., project.dataset.table)",
         example="psearch-dev-ze.processed_data.products"
     )
-    destination_schema: Dict[str, Any] = Field(
-        ..., 
-        description="JSON schema definition for the destination table structure"
+    destination_schema: Optional[Dict[str, Any]] = Field(
+        None, 
+        description="Optional JSON schema definition for the destination table structure. If not provided, the system will use the default schema.json file."
+    )
+    source_schema_fields: List[str] = Field(
+        ...,
+        description="A list of field names available in the source table.",
+        example=["id", "title", "description", "price"]
     )
     
     model_config = {
@@ -141,6 +146,7 @@ class SQLGenerationRequest(BaseModel):
             "example": {
                 "source_table": "psearch-dev-ze.raw_data.product_catalog",
                 "destination_table": "psearch-dev-ze.processed_data.products",
+                "source_schema_fields": ["product_id", "product_title", "category", "vendor_price"],
                 "destination_schema": {
                     "fields": [
                         {"name": "id", "type": "STRING", "mode": "REQUIRED"},
@@ -451,23 +457,117 @@ async def generate_sql(request: SQLGenerationRequest):
     logger.info(f"Received SQL generation request: {request.source_table} -> {request.destination_table}")
     
     try:
-        # Generate the SQL transformation script
-        sql_script = sql_transformation_service.generate_sql_transformation(
-            source_table=request.source_table,
-            destination_table=request.destination_table,
+        # --- Step 1: Initial Syntactic SQL Generation ---
+        initial_generation_result = sql_transformation_service.generate_sql_transformation(
+            source_table_name=request.source_table,
+            destination_table_name=request.destination_table,
+            source_schema_fields=request.source_schema_fields,
             destination_schema=request.destination_schema
         )
+        current_sql = initial_generation_result.get("sql_query")
+        if not current_sql:
+            raise ValueError("Initial SQL generation did not return a SQL query.")
+
+        logger.info(f"Initial SQL generated: {current_sql[:200]}...")
         
-        # Return the generated SQL script
+        # --- Step 2: Internal Validation & Prep for Semantic Enhancement ---
+        source_data_sample_json = None
+        
+        # Use the new method to identify defaulted fields that need semantic mapping
+        fields_to_semantically_refine = sql_transformation_service.identify_defaulted_fields(current_sql)
+        
+        if fields_to_semantically_refine:
+            logger.info(f"Critical fields defaulted, attempting to fetch source sample for semantic enhancement: {fields_to_semantically_refine}")
+            try:
+                from google.cloud import bigquery
+                # Ensure project_id is available, falling back to environment if service's isn't directly accessible
+                bq_project_id = sql_transformation_service.project_id or os.environ.get("PROJECT_ID")
+                if not bq_project_id:
+                    raise ValueError("Project ID not configured for BigQuery client.")
+                
+                bq_client = bigquery.Client(project=bq_project_id)
+                sample_query = f"SELECT * FROM `{request.source_table}` LIMIT 3" # Use request.source_table which is the full ID
+                logger.info(f"Fetching source data sample with query: {sample_query}")
+                query_job = bq_client.query(sample_query)
+                rows = [dict(row) for row in query_job.result(timeout=30)] # Timeout for safety
+                if rows:
+                    source_data_sample_json = json.dumps(rows, indent=2)
+                    # We already have fields_to_semantically_refine from the identify_defaulted_fields method
+                    logger.info(f"Source data sample fetched successfully. Sample: {source_data_sample_json[:200]}...")
+                else:
+                    logger.warning("No rows returned for source data sample.")
+            except Exception as bq_err:
+                logger.error(f"Failed to fetch source data sample: {bq_err}")
+                # Continue without semantic enhancement if sample fetching fails
+
+        # --- Step 3: Call Semantic Enhancement if needed ---
+        if fields_to_semantically_refine and source_data_sample_json:
+            logger.info(f"Calling semantic enhancement for fields: {fields_to_semantically_refine}")
+            current_sql = sql_transformation_service.semantically_enhance_sql(
+                current_sql_query=current_sql,
+                source_table_name=request.source_table,
+                source_schema_fields=request.source_schema_fields,
+                source_data_sample_json=source_data_sample_json,
+                destination_schema=request.destination_schema,
+                critical_fields_to_refine=fields_to_semantically_refine
+            )
+            logger.info(f"SQL after semantic enhancement: {current_sql[:200]}...")
+        else:
+            logger.info("Skipping semantic enhancement step.")
+
+        # --- Step 4 & 5: BigQuery Dry Run & Iterative Fixing ---
+        max_fix_attempts = 3
+        last_error_message = "SQL script initially passed to validation." # Placeholder for first iteration
+
+        for attempt in range(max_fix_attempts + 1): # +1 to allow initial validation
+            logger.info(f"Attempting BigQuery Dry Run (Attempt {attempt + 1 if attempt < max_fix_attempts else 'Final Validation'}) for SQL: {current_sql[:200]}...")
+            try:
+                validation_result = sql_fix_service.validate_sql(sql_script=current_sql, timeout_seconds=60)
+            except Exception as val_err: # Catch errors from validate_sql itself
+                 logger.error(f"Dry run call failed: {val_err}")
+                 validation_result = {"valid": False, "error": f"Dry run execution failed: {str(val_err)}"}
+
+
+            if validation_result.get("valid"):
+                logger.info("SQL script validated successfully via BigQuery Dry Run.")
+                break # Exit loop if valid
+            
+            last_error_message = validation_result.get("error", "Unknown validation error from BigQuery Dry Run.")
+            logger.warning(f"SQL Dry Run failed: {last_error_message}")
+
+            if attempt < max_fix_attempts:
+                logger.info(f"Attempting AI-powered fix (Attempt {attempt + 1}/{max_fix_attempts}) for error: {last_error_message[:100]}...")
+                try:
+                    current_sql = sql_transformation_service.refine_sql_script(
+                        sql_script=current_sql,
+                        error_message=last_error_message
+                    )
+                    logger.info(f"SQL after fix attempt {attempt + 1}: {current_sql[:200]}...")
+                except Exception as refine_err:
+                    logger.error(f"Call to refine_sql_script failed: {refine_err}")
+                    # If refine_sql_script itself errors, we can't continue this loop path
+                    raise HTTPException(status_code=500, detail=f"Error during SQL refinement process: {str(refine_err)}")
+            else:
+                logger.error(f"Failed to produce valid SQL after {max_fix_attempts} fix attempts. Last error: {last_error_message}")
+                raise HTTPException(status_code=500, detail=f"Failed to produce valid SQL after {max_fix_attempts} fix attempts. Last error: {last_error_message}")
+        
+        # --- Optional: Final Whitespace Cleanup (Contingency) ---
+        # Example: current_sql = current_sql.replace("TABLE\`", "TABLE \`").replace("\`AS", "\` AS")
+        # This should be used cautiously and with robust regex if implemented.
+        # For now, relying on prompt engineering for formatting.
+
         return {
-            "sql_script": sql_script,
+            "sql_script": current_sql,
             "source_table": request.source_table,
-            "destination_table": request.destination_table
+            "destination_table": request.destination_table,
+            "message": "SQL script generated and validated successfully." if validation_result.get("valid") else "SQL script generated but failed final validation."
         }
         
+    except HTTPException: # Re-raise HTTPExceptions directly
+        raise
     except Exception as e:
-        logger.error(f"Error generating SQL transformation: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error in full SQL generation orchestrator: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred during SQL generation: {str(e)}")
 
 
 @app.post(

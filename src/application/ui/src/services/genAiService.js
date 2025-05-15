@@ -223,9 +223,10 @@ export const generateEnhancedImage = async (payload) => {
  * to the target product schema.
  * @param {string} sourceTableId Full BigQuery source table ID (e.g., project.dataset.table)
  * @param {string} destinationTableId Full BigQuery destination table ID (e.g., project.dataset.table)
+ * @param {Array<string>} [sourceSchemaFields] Optional list of field names available in the source table
  * @returns {Promise<string>} The generated SQL script.
  */
-export const generateTransformationSql = async (sourceTableId, destinationTableId) => {
+export const generateTransformationSql = async (sourceTableId, destinationTableId, sourceSchemaFields) => {
   try {
     console.log(`Requesting SQL generation from ${sourceTableId} to ${destinationTableId}`);
     console.log("Using destination schema defined in products.json"); // Avoid logging the whole schema
@@ -242,12 +243,32 @@ export const generateTransformationSql = async (sourceTableId, destinationTableI
     const fullDestinationTableId = destinationTableId.includes('.') ? destinationTableId : `${projectId}.${destinationTableId}`;
 
 
+    // If sourceSchemaFields wasn't provided, use a default set of common fields based on the table name
+    const fieldsToUse = sourceSchemaFields || [];
+    
+    // If no fields were provided and this appears to be a Facebook feed, use some common Facebook fields
+    if (fieldsToUse.length === 0 && sourceTableId.toLowerCase().includes('facebook')) {
+      console.log("No source schema fields provided. Using default Facebook feed fields.");
+      // Common fields found in Facebook product feeds
+      fieldsToUse.push(
+        "id", "title", "description", "availability", "condition", "price", "link", 
+        "image_link", "brand", "additional_image_link", "color", "size", "item_group_id"
+      );
+    } else if (fieldsToUse.length === 0) {
+      console.log("No source schema fields provided. Using minimal default fields.");
+      // Generic minimal fields
+      fieldsToUse.push("id", "title", "description");
+    }
+    
+    console.log(`Using source schema fields: ${fieldsToUse.join(', ')}`);
+
     const response = await axios.post(`${GEN_AI_URL}/generate-sql`, {
       source_table: fullSourceTableId,
       destination_table: fullDestinationTableId,
-      destination_schema: productSchema // Send the imported JSON schema
+      destination_schema: productSchema, // Send the imported JSON schema
+      source_schema_fields: fieldsToUse  // Include the source schema fields
     }, {
-      timeout: 180000, // 180 second (3 minute) timeout for complex SQL generation
+      timeout: 300000, // 300 second (5 minute) timeout for complex SQL generation
       headers: {
         'Content-Type': 'application/json',
         'Accept': 'application/json'
@@ -274,24 +295,28 @@ export const generateTransformationSql = async (sourceTableId, destinationTableI
       }
     }
     
-    // Fix double backticks issue in table references
-    // This regex matches ``table_name`` pattern and replaces with `table_name`
-    sqlScript = sqlScript.replace(/``([^`]+)``/g, '`$1`');
+    // Enhanced SQL Formatting and Whitespace Normalization
     
-    // Fix any other potential quoting issues
-    // 1. Remove extra spaces between backticks and table names
-    sqlScript = sqlScript.replace(/`\s+/g, '`');
-    sqlScript = sqlScript.replace(/\s+`/g, '`');
+    // 1. Normalize spaces around operators and parentheses
+    sqlScript = sqlScript.replace(/\s*([=<>!(),])\s*/g, ' $1 '); // Add space around operators and parentheses/commas
+    sqlScript = sqlScript.replace(/\s*(\bAS\b|\bAND\b|\bOR\b|\bSELECT\b|\bFROM\b|\bWHERE\b|\bLEFT JOIN\b|\bRIGHT JOIN\b|\bINNER JOIN\b|\bON\b|\bGROUP BY\b|\bORDER BY\b|\bLIMIT\b|\bOFFSET\b|\bUNION ALL\b|\bUNION\b|\bINTERSECT\b|\bEXCEPT\b)\s*/gi, ' $1 ');
+
+    // 2. Fix backtick issues: ``table`` to `table`, and ensure `project.dataset.table` is correctly quoted.
+    sqlScript = sqlScript.replace(/``([^`]+)``/g, '`$1`'); // ``table`` -> `table`
+    sqlScript = sqlScript.replace(/`\s*([^`\s]+)\s*`/g, '`$1`'); // ` table ` -> `table`
     
-    // 2. Ensure project.dataset.table has proper quoting
-    const tableRefPattern = /`?([a-zA-Z0-9_-]+)\.([a-zA-Z0-9_-]+)\.([a-zA-Z0-9_-]+)`?/g;
-    sqlScript = sqlScript.replace(tableRefPattern, function(match, project, dataset, table) {
-      // Properly quote the full reference
-      if (!match.startsWith('`') || !match.endsWith('`')) {
-        return `\`${project}.${dataset}.${table}\``;
-      }
-      return match;
+    // 3. Ensure project.dataset.table has proper quoting without internal spaces
+    const tableRefPattern = /`?\s*([a-zA-Z0-9_-]+)\s*\.\s*([a-zA-Z0-9_-]+)\s*\.\s*([a-zA-Z0-9_-]+)\s*`?/g;
+    sqlScript = sqlScript.replace(tableRefPattern, (match, project, dataset, table) => {
+      return `\`${project.trim()}.${dataset.trim()}.${table.trim()}\``;
     });
+
+    // 4. Consolidate multiple spaces into single spaces, but not inside string literals
+    // This is a bit tricky with regex. A simpler approach for now:
+    sqlScript = sqlScript.replace(/\s\s+/g, ' ');
+    
+    // 5. Trim whitespace from each line and the overall script again
+    sqlScript = sqlScript.split('\n').map(line => line.trim()).join('\n').trim();
     
     console.log("Processed SQL script ready for display:", sqlScript.substring(0, 100) + "...");
     return sqlScript; // Return the cleaned SQL string
