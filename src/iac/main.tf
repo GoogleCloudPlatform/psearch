@@ -46,6 +46,9 @@ resource "google_project_service" "required_apis" {
   for_each = toset([
     "aiplatform.googleapis.com",
     "artifactregistry.googleapis.com",
+    "bigquery.googleapis.com",
+    "bigqueryconnection.googleapis.com",
+    "bigquerydatatransfer.googleapis.com",
     "cloudbuild.googleapis.com",
     "cloudfunctions.googleapis.com",
     "containerregistry.googleapis.com",
@@ -93,12 +96,12 @@ module "spanner" {
 }
 
 module "ingestion_spanner" {
-  source                = "./modules/ingestion_spanner"
-  project_id            = var.project_id
-  region                = var.region
-  service_account_email = module.iam.ingestion_service_account_email
-  spanner_instance_id   = module.spanner.instance_id
-  spanner_database_id   = module.spanner.database_id
+  source                      = "./modules/ingestion_spanner"
+  project_id                  = var.project_id
+  region                      = var.region
+  bq_dt_service_account_email = module.iam.ingestion_service_account_email # Assuming this SA has BQ Data Transfer permissions
+  spanner_instance_id         = module.spanner.instance_id
+  spanner_database_id         = module.spanner.database_id
 
   depends_on = [
     module.spanner

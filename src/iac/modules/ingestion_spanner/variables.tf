@@ -23,33 +23,9 @@ variable "region" {
   type        = string
 }
 
-variable "service_account_email" {
-  description = "The service account email to be used by Cloud Build and Cloud Run"
+variable "bq_dt_service_account_email" {
+  description = "The service account email for BigQuery Data Transfer service"
   type        = string
-}
-
-variable "cpu_limit" {
-  description = "CPU limit for the Cloud Run job"
-  type        = string
-  default     = "2000m"
-}
-
-variable "memory_limit" {
-  description = "Memory limit for the Cloud Run job"
-  type        = string
-  default     = "4Gi"
-}
-
-variable "max_retries" {
-  description = "Maximum number of retries for the Cloud Run job"
-  type        = number
-  default     = 0
-}
-
-variable "timeout_seconds" {
-  description = "Timeout in seconds for the Cloud Run job"
-  type        = number
-  default     = 86400
 }
 
 variable "spanner_instance_id" {

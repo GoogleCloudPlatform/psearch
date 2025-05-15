@@ -213,16 +213,14 @@ func (s *SpannerService) HybridSearch(ctx context.Context, query string, limit i
 			return nil, fmt.Errorf("error iterating through search results: %v", err)
 		}
 
-		var productIDInt int64
+		var productID string
 		var title string
 		var productDataJSON spanner.NullJSON
 		var hybridScore float64
 
-		if err := row.Columns(&hybridScore, &productIDInt, &title, &productDataJSON); err != nil {
+		if err := row.Columns(&hybridScore, &productID, &title, &productDataJSON); err != nil {
 			return nil, fmt.Errorf("failed to scan search result: %v", err)
 		}
-
-		productID := fmt.Sprintf("%d", productIDInt)
 
 		if !productDataJSON.Valid {
 			continue
@@ -438,6 +436,8 @@ func (s *SpannerService) transformToSearchResult(productID string, productData m
 		URI:               uri,
 		Score:             scoreMap,
 	}
+
+	log.Printf("Results", result)
 
 	return result, nil
 }

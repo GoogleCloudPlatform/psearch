@@ -73,6 +73,9 @@ locals {
   image_path = "${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.search_api_repo.repository_id}/${local.service_name}"
 }
 
+
+#TODO: Alterar a quantidade de max concurrent request para 320
+
 # Create a Cloud Run service
 resource "google_cloud_run_v2_service" "search_api_service" {
   name     = local.service_name
