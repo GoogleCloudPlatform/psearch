@@ -68,7 +68,9 @@ import DeleteIcon from '@mui/icons-material/Delete';
 import EditIcon from '@mui/icons-material/Edit';
 import config from '../config';
 import { sourceIngestionService } from '../services/sourceIngestionService';
-import { generateTransformationSql, refineTransformationSql } from '../services/genAiService'; // Added GenAI service imports
+// Removed refineTransformationSql from import
+// Added getSqlTaskStatus and getSimpleSqlFix
+import { generateTransformationSql, getSqlTaskStatus, getSimpleSqlFix } from '../services/genAiService'; 
 
 // Component for file upload and processing
 const SourceIngestion = () => {
@@ -104,17 +106,23 @@ const SourceIngestion = () => {
   const [isTableCreated, setIsTableCreated] = useState(false); // Tracks success of manual creation
 
   // GenAI SQL Generation state
-  const [isGeneratingSql, setIsGeneratingSql] = useState(false);
+  const [isGeneratingSql, setIsGeneratingSql] = useState(false); // Will now indicate "task submission"
   const [generatedSql, setGeneratedSql] = useState(null);
   const [sqlGenerationError, setSqlGenerationError] = useState(null);
+  const [currentTaskId, setCurrentTaskId] = useState(null); // New state for task ID
+  const [taskStatusDetails, setTaskStatusDetails] = useState(null); // New state for full task status
+  const [isPollingTaskStatus, setIsPollingTaskStatus] = useState(false); // New state for polling status
 
   // Dry Run & Refine SQL state
   const [isDryRunning, setIsDryRunning] = useState(false);
   const [dryRunError, setDryRunError] = useState(null);
   const [dryRunSuccess, setDryRunSuccess] = useState(false);
-  const [isRefiningSql, setIsRefiningSql] = useState(false);
-  const [sqlFixAttemptNumber, setSqlFixAttemptNumber] = useState(1); // Add state for SQL fix attempt tracking
-  // const [generationPrompt, setGenerationPrompt] = useState(''); // Add if prompt becomes dynamic/editable later
+  const [sqlFixAttemptNumber, setSqlFixAttemptNumber] = useState(1); // Used by SqlErrorFix component
+
+  // State for "Simple Fix"
+  const [isAttemptingSimpleFix, setIsAttemptingSimpleFix] = useState(false);
+  const [simpleFixSql, setSimpleFixSql] = useState(null); // Stores SQL from simple fix
+  const [simpleFixError, setSimpleFixError] = useState(null);
   
   // Refs
   const fileInputRef = useRef(null);
@@ -522,6 +530,9 @@ const SourceIngestion = () => {
     if (activeStep === 4) { // Leaving Generate SQL step
         setGeneratedSql(null);
         setSqlGenerationError(null);
+        setCurrentTaskId(null); // Reset task ID
+        setTaskStatusDetails(null); // Reset task status details
+        setIsPollingTaskStatus(false); // Stop polling
     }
      if (activeStep === 3) { // Leaving Load Data step
         // Optional: Stop polling if going back? Or let it continue?
@@ -565,13 +576,19 @@ const SourceIngestion = () => {
     setIsGeneratingSql(false);
     setGeneratedSql(null);
     setSqlGenerationError(null);
+    setCurrentTaskId(null); // Reset task ID
+    setTaskStatusDetails(null); // Reset task status details
+    setIsPollingTaskStatus(false); // Reset polling state
     // setGenerationPrompt(''); // Reset prompt if state is added
     setIsDryRunning(false);
     setDryRunError(null);
     setDryRunSuccess(false);
-    setIsRefiningSql(false);
     setIsLoadDataRunning(false);
     setMaxBadRecords(0);
+    // Reset simple fix states
+    setIsAttemptingSimpleFix(false);
+    setSimpleFixSql(null);
+    setSimpleFixError(null);
     
     // Reset file input
     if (fileInputRef.current) {
@@ -604,50 +621,137 @@ const SourceIngestion = () => {
         return;
     }
 
-    setIsGeneratingSql(true);
+    setIsGeneratingSql(true); // Indicates task submission is in progress
     setGeneratedSql(null);
     setSqlGenerationError(null);
+    setCurrentTaskId(null);
+    setTaskStatusDetails(null);
+    setIsPollingTaskStatus(false);
     setError(null);
     setSuccess(null);
 
-    // Construct table IDs - service handles adding project ID if needed
     const sourceTable = `${datasetId}.${tableId}`;
-    const destinationTable = `products_psearch.psearch`; // Target Dataset.Table format
-
-    // Extract field names from the schema to pass to the SQL generator
+    const destinationTable = `products_psearch.psearch`; 
     const sourceSchemaFields = schema.map(field => field.name);
-    console.log("Requesting SQL generation for:", sourceTable, "->", destinationTable);
-    console.log("Using source schema fields:", sourceSchemaFields);
+
+    console.log("Initiating SQL generation task for:", sourceTable, "->", destinationTable);
 
     try {
-      // The genAiService now handles SQL normalization internally
-      const sqlScript = await generateTransformationSql(
+      // generateTransformationSql now returns an object like { task_id: "...", message: "..." }
+      const taskResponse = await generateTransformationSql(
         sourceTable,
         destinationTable,
-        sourceSchemaFields // Pass the schema field names
+        sourceSchemaFields
       );
       
-      console.log("SQL script received:", sqlScript.substring(0, 100) + "...");
-      
-      // Store the normalized SQL script
-      setGeneratedSql(sqlScript);
-      setSuccess("SQL script generated successfully!");
-      
-      // Automatically move to the next step after successful generation
-      setActiveStep((prevStep) => prevStep + 1); 
-
+      if (taskResponse && taskResponse.task_id) {
+        setCurrentTaskId(taskResponse.task_id);
+        setSuccess(taskResponse.message || `SQL generation task submitted (ID: ${taskResponse.task_id}). Monitoring progress...`);
+        setIsPollingTaskStatus(true);
+        // Start polling immediately
+        fetchTaskStatus(taskResponse.task_id); 
+      } else {
+        throw new Error("Failed to initiate SQL generation task: No task_id received.");
+      }
     } catch (error) {
-      console.error("SQL Generation failed:", error);
-      let message = error.message || "An unknown error occurred during SQL generation.";
+      console.error("SQL Generation Task initiation failed:", error);
+      let message = error.message || "An unknown error occurred during SQL task initiation.";
       if (error.response?.data?.detail) {
           message = error.response.data.detail;
       }
       setSqlGenerationError(message);
-      setError(`SQL Generation Failed: ${message}`);
+      setError(`SQL Task Initiation Failed: ${message}`);
     } finally {
-      setIsGeneratingSql(false);
+      setIsGeneratingSql(false); // Task submission attempt finished
     }
   };
+
+  // New function to poll task status
+  const fetchTaskStatus = async (taskIdToFetch) => {
+    if (!taskIdToFetch) return;
+
+    try {
+      const statusDetails = await getSqlTaskStatus(taskIdToFetch);
+      setTaskStatusDetails(statusDetails);
+
+      if (statusDetails.status === 'completed') {
+        setIsPollingTaskStatus(false);
+        // Assuming the SQL script is in statusDetails.result
+        if (statusDetails.result && typeof statusDetails.result === 'string' && statusDetails.result.trim() !== "") {
+          let sqlScript = statusDetails.result.trim();
+          // Perform client-side formatting on the received SQL
+          // let sqlScript = String(statusDetails.result).trim(); // Original line
+          if (sqlScript.startsWith("```") && sqlScript.endsWith("```")) {
+            sqlScript = sqlScript.substring(3, sqlScript.length - 3).trim();
+            if (sqlScript.startsWith("sql") || sqlScript.startsWith("SQL")) {
+              sqlScript = sqlScript.substring(3).trim();
+            }
+          }
+          sqlScript = sqlScript.replace(/\s*([=<>!(),])\s*/g, ' $1 ');
+          sqlScript = sqlScript.replace(/\s*(\bAS\b|\bAND\b|\bOR\b|\bSELECT\b|\bFROM\b|\bWHERE\b|\bLEFT JOIN\b|\bRIGHT JOIN\b|\bINNER JOIN\b|\bON\b|\bGROUP BY\b|\bORDER BY\b|\bLIMIT\b|\bOFFSET\b|\bUNION ALL\b|\bUNION\b|\bINTERSECT\b|\bEXCEPT\b)\s*/gi, ' $1 ');
+          sqlScript = sqlScript.replace(/``([^`]+)``/g, '`$1`'); 
+          sqlScript = sqlScript.replace(/`\s*([^`\s]+)\s*`/g, '`$1`');
+          const tableRefPattern = /`?\s*([a-zA-Z0-9_-]+)\s*\.\s*([a-zA-Z0-9_-]+)\s*\.\s*([a-zA-Z0-9_-]+)\s*`?/g;
+          sqlScript = sqlScript.replace(tableRefPattern, (match, project, dataset, table) => {
+            return `\`${project.trim()}.${dataset.trim()}.${table.trim()}\``;
+          });
+          sqlScript = sqlScript.replace(/\s\s+/g, ' ');
+          sqlScript = sqlScript.split('\n').map(line => line.trim()).join('\n').trim();
+          
+          setGeneratedSql(sqlScript);
+          setSuccess("SQL generation task completed successfully!");
+          // Explicitly set to step 5 if current step is 4
+          setActiveStep((currentActiveStep) => {
+            if (currentActiveStep === 4) {
+              console.log("SQL Generation task completed, moving from step 4 to 5.");
+              return 5; // Transition from Generate SQL (index 4) to Dry Run & Refine SQL (index 5)
+            }
+            // This case should ideally not be hit if workflow logic is correct,
+            // as task completion should happen while UI is on step 4.
+            console.warn(`SQL Task completed but activeStep was ${currentActiveStep} (expected 4). Staying on current step ${currentActiveStep}.`);
+            return currentActiveStep; 
+          });
+        } else {
+           setSqlGenerationError("SQL generation task completed, but no SQL script was returned in the result.");
+           setError("SQL generation task completed, but no SQL script was returned.");
+        }
+      } else if (statusDetails.status === 'failed') {
+        setIsPollingTaskStatus(false);
+        setSqlGenerationError(statusDetails.error || "SQL generation task failed.");
+        setError(`SQL Task Failed: ${statusDetails.error || "Unknown error"}`);
+      } else {
+        // If still processing, continue polling
+        // setTimeout is used here to avoid overlapping calls if getSqlTaskStatus is slow
+        // A more robust solution might use a single interval managed in useEffect
+        setTimeout(() => fetchTaskStatus(taskIdToFetch), 5000); 
+      }
+    } catch (error) {
+      console.error(`Error fetching status for task ${taskIdToFetch}:`, error);
+      // Potentially stop polling on repeated errors or notify user
+      // For now, just log and it will retry on next interval if polling is still active via other means
+      // Or, if this is the primary polling mechanism, set isPollingTaskStatus to false.
+      // Let's assume for now that if fetchTaskStatus itself errors, we stop.
+      setIsPollingTaskStatus(false);
+      setError(`Error fetching task status: ${error.message}`);
+    }
+  };
+  
+  // Effect to manage polling based on isPollingTaskStatus and currentTaskId
+  // This provides a more robust way to manage the interval
+  useEffect(() => {
+    let intervalId = null;
+    if (isPollingTaskStatus && currentTaskId) {
+      intervalId = setInterval(() => {
+        fetchTaskStatus(currentTaskId);
+      }, 5000); // Poll every 5 seconds
+    }
+    return () => {
+      if (intervalId) {
+        clearInterval(intervalId);
+      }
+    };
+  }, [isPollingTaskStatus, currentTaskId]);
+
 
   // Handle Dry Run SQL
   const handleDryRunSql = async () => {
@@ -693,76 +797,47 @@ const SourceIngestion = () => {
     }
   };
 
-  // Handle Refine SQL with AI
-  const handleRefineSql = async () => {
-    if (!generatedSql || !dryRunError) {
-      setSqlGenerationError("Cannot refine SQL without an initial script and a dry run error.");
-      setError("Cannot refine: Need SQL script and a dry run error.");
+  // The handleRefineSql function is removed.
+  // The SqlErrorFix component now handles the refinement flow internally using generateSqlFix from the service.
+  // The onSqlFixed prop of SqlErrorFix will update SourceIngestion's state when a fix is successful.
+
+  const handleAttemptSimpleFix = async () => {
+    if (!taskStatusDetails || taskStatusDetails.status !== 'failed_validation_final_sql_available' || !taskStatusDetails.result || !taskStatusDetails.error) {
+      setError("Cannot attempt simple fix: required information (last SQL attempt or error) is missing from task details.");
       return;
     }
-
-    // Extract specific field name from error message if possible
-    let missingField = null;
-    let fieldMatch = /Invalid field reference '([^']+)'/.exec(dryRunError);
-    if (fieldMatch && fieldMatch[1]) {
-      missingField = fieldMatch[1];
-    }
-
-    // Parse error message to show more helpful UI feedback
-    let errorType = "syntax error";
-    let specificFix = "";
     
-    if (missingField) {
-      errorType = `missing field '${missingField}'`;
-      specificFix = `. Will add default values for ${missingField}`;
-    } else if (dryRunError.includes("Invalid syntax near")) {
-      errorType = "column reference issue";
-    } else if (dryRunError.includes("Column not found")) {
-      errorType = "missing column";
-    } else if (dryRunError.includes("Unrecognized name")) {
-      errorType = "unrecognized field name";
-    }
-
-    setIsRefiningSql(true);
-    setSqlGenerationError(null); // Clear previous errors
-    setError(null);
-    setSuccess(`AI is analyzing the ${errorType}${specificFix} and refining the SQL...`);
+    setIsAttemptingSimpleFix(true);
+    setSimpleFixError(null);
+    setSimpleFixSql(null); // Clear previous simple fix SQL
+    setDryRunError(null); // Clear previous dry run errors to give this new SQL a chance
+    setDryRunSuccess(false); // Reset dry run success
 
     try {
-      console.log(`Attempting to refine SQL based on error: ${dryRunError}`);
+      const lastFailedSql = taskStatusDetails.result;
+      const lastError = taskStatusDetails.error;
       
-      // Always use the real AI refinement service which we've enhanced to handle
-      // specific errors like colorFamilies effectively
-      const refinedScript = await refineTransformationSql(generatedSql, dryRunError);
-      
-      // Add additional logging about what changes were made
-      console.log("SQL refinement completed. Analyzing changes...");
-      
-      // Check for specific pattern additions that indicate successful refinement
-      let refinementSummary = "";
-      if (missingField === "colorFamilies" && 
-          refinedScript.includes("Default") && 
-          !generatedSql.includes("Default")) {
-        refinementSummary = " Added default values for missing colorFamilies field.";
-      } else if (refinedScript.includes("IFNULL") && !generatedSql.includes("IFNULL")) {
-        refinementSummary = " Added NULL handling for potentially missing fields.";
+      console.log("Attempting simple AI fix for SQL:", lastFailedSql.substring(0,100) + "...", "Error:", lastError.substring(0,100) + "...");
+      const fixResponse = await getSimpleSqlFix(lastFailedSql, lastError);
+
+      if (fixResponse.error) {
+        setSimpleFixError(fixResponse.error);
+        setError(`Simple AI Fix Failed: ${fixResponse.error}`);
+      } else if (fixResponse.suggested_fixed_sql) {
+        setSimpleFixSql(fixResponse.suggested_fixed_sql); // Store this new SQL
+        setGeneratedSql(fixResponse.suggested_fixed_sql); // Also update generatedSql to be used by Validate & BQ Studio buttons
+        setSuccess("Simple AI fix suggested a new SQL script. Please validate it.");
+        // The user should now click "Validate SQL" for this new script.
+      } else {
+        setSimpleFixError("Simple AI fix did not return a SQL script or an error.");
+        setError("Simple AI Fix attempt did not yield a result.");
       }
-
-      setGeneratedSql(refinedScript); // Update the SQL with the refined version
-      setDryRunError(null); // Clear the error as we have a new script
-      setDryRunSuccess(false); // Reset success state, need new dry run
-      setSuccess(`SQL script refined by AI.${refinementSummary} Please review and try Dry Run again.`);
-
     } catch (error) {
-      console.error("Error refining SQL:", error);
-      let message = error.message || "An unknown error occurred during SQL refinement.";
-      if (error.response?.data?.detail) {
-        message = error.response.data.detail;
-      }
-      setSqlGenerationError(`AI Refinement Failed: ${message}`);
-      setError(`AI Refinement Failed: ${message}`);
+      console.error("Error during simple AI fix:", error);
+      setSimpleFixError(error.message || "An unknown error occurred during simple AI fix.");
+      setError(`Simple AI Fix Attempt Error: ${error.message || "Unknown error"}`);
     } finally {
-      setIsRefiningSql(false);
+      setIsAttemptingSimpleFix(false);
     }
   };
 
@@ -1198,20 +1273,53 @@ const SourceIngestion = () => {
             <Button
               variant="contained"
               onClick={handleGenerateSql}
-              disabled={isGeneratingSql || generatedSql} // Disable if generating or already generated
-              startIcon={isGeneratingSql ? <CircularProgress size={20} color="inherit" /> : <CodeIcon />}
+              disabled={isGeneratingSql || isPollingTaskStatus || generatedSql} // Disable if submitting, polling, or already generated
+              startIcon={(isGeneratingSql || isPollingTaskStatus) ? <CircularProgress size={20} color="inherit" /> : <CodeIcon />}
               sx={{ mb: 2 }}
             >
-              {isGeneratingSql ? 'Generating SQL...' : (generatedSql ? 'SQL Generated' : 'Generate SQL with AI')}
+              {isGeneratingSql ? 'Submitting Task...' : 
+               isPollingTaskStatus ? `Processing Task: ${taskStatusDetails?.status || 'loading'}...` : 
+               (generatedSql ? 'SQL Generated' : 'Generate SQL with AI Task')}
             </Button>
 
             {sqlGenerationError && <Alert severity="error" sx={{ mb: 2 }}>{sqlGenerationError}</Alert>}
+            
+            {taskStatusDetails && (
+              <Card variant="outlined" sx={{mb: 2}}>
+                <CardContent>
+                  <Typography variant="subtitle2">Task ID: {taskStatusDetails.task_id}</Typography>
+                  <Typography variant="body2">Status: <Chip label={taskStatusDetails.status} size="small" color={
+                      taskStatusDetails.status === 'completed' ? 'success' :
+                      taskStatusDetails.status === 'failed' ? 'error' :
+                      'info'
+                    } />
+                  </Typography>
+                  {taskStatusDetails.error && <Alert severity="error" sx={{mt:1}}>{taskStatusDetails.error}</Alert>}
+                  
+                  <Typography variant="subtitle2" sx={{mt:2}}>Logs:</Typography>
+                  <Paper variant="outlined" sx={{ p: 1, maxHeight: '150px', overflowY: 'auto', fontSize: '0.8rem', backgroundColor: '#f9f9f9' }}>
+                    {(taskStatusDetails.logs && taskStatusDetails.logs.length > 0) ? (
+                      taskStatusDetails.logs.map((log, index) => (
+                        <Box key={index} sx={{borderBottom: '1px solid #eee', pb:0.5, mb:0.5}}>
+                           <Typography variant="caption" display="block" color="textSecondary">
+                             {new Date(log.timestamp).toLocaleString()}
+                           </Typography>
+                           <Typography variant="body2" sx={{whiteSpace: 'pre-wrap'}}>{log.message}</Typography>
+                        </Box>
+                      ))
+                    ) : (
+                      <Typography variant="caption">No logs yet.</Typography>
+                    )}
+                  </Paper>
+                </CardContent>
+              </Card>
+            )}
             
             {generatedSql && (
               <Card variant="outlined">
                 <CardContent>
                   <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }}>
-                      <Typography variant="subtitle1">Generated SQL Script</Typography>
+                      <Typography variant="subtitle1">Generated SQL Script (from Task Result)</Typography>
                       <Tooltip title="Copy SQL to clipboard">
                           <IconButton onClick={() => navigator.clipboard.writeText(generatedSql)} size="small">
                               <ContentCopyIcon fontSize="small" />
@@ -1259,50 +1367,78 @@ const SourceIngestion = () => {
               Validate the generated SQL script with a BigQuery dry run. If errors occur, use AI to refine the script.
             </Typography>
 
-            {generatedSql ? (
+            { (generatedSql || (taskStatusDetails?.status === 'failed_validation_final_sql_available' && taskStatusDetails?.result)) ? (
               <>
                 <Card variant="outlined" sx={{ mb: 2 }}>
                   <CardContent>
                     <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }}>
                       <Typography variant="subtitle1">SQL Script to Validate</Typography>
                       <Tooltip title="Copy SQL to clipboard">
-                        <IconButton onClick={() => navigator.clipboard.writeText(generatedSql)} size="small">
+                        <IconButton onClick={() => navigator.clipboard.writeText(generatedSql || taskStatusDetails?.result)} size="small">
                           <ContentCopyIcon fontSize="small" />
                         </IconButton>
                       </Tooltip>
                     </Stack>
                     <Paper variant="outlined" sx={{ p: 2, maxHeight: '300px', overflowY: 'auto', backgroundColor: '#f5f5f5', mb: 2 }}>
                       <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordWrap: 'break-word' }}>
-                        <code>{generatedSql}</code>
+                        <code>{generatedSql || taskStatusDetails?.result /* Show last attempt if main one failed */}</code>
                       </pre>
                     </Paper>
                     
+                    {/* Display error from main pipeline if it ended with failed_validation_final_sql_available */}
+                    {taskStatusDetails?.status === 'failed_validation_final_sql_available' && taskStatusDetails?.error && !dryRunError && (
+                        <Alert severity="error" sx={{mt:1, mb:1}}>
+                            Pipeline validation failed: {taskStatusDetails.error}
+                        </Alert>
+                    )}
+                    {simpleFixError && <Alert severity="error" sx={{mt:1, mb:1}}>Simple AI Fix Error: {simpleFixError}</Alert>}
+
+
                     <Stack direction="row" spacing={1} sx={{ mt: 2 }}>
-                      {/* Show dry run button if we haven't run it yet OR if it previously failed and isn't currently running */}
-                      {(!dryRunSuccess || dryRunError) && (
+                      {/* Validate SQL Button (for generatedSql or simpleFixSql) */}
+                      { (generatedSql || simpleFixSql) && (!dryRunSuccess || dryRunError || simpleFixError) && (
                         <Button
                           variant="contained"
                           color="primary"
-                          onClick={handleDryRunSql}
-                          disabled={isDryRunning}
+                          onClick={handleDryRunSql} // handleDryRunSql should use 'generatedSql' which is updated by simpleFix
+                          disabled={isDryRunning || isAttemptingSimpleFix}
                           startIcon={isDryRunning ? <CircularProgress size={20} color="inherit" /> : <VisibilityIcon />}
                         >
-                          {isDryRunning ? 'Validating...' : (dryRunError ? 'Retry Validation' : 'Validate SQL')}
+                          {isDryRunning ? 'Validating...' : (dryRunError || simpleFixError ? 'Retry Validation' : 'Validate SQL')}
                         </Button>
                       )}
 
-                      {generatedSql && (
+                      {/* Attempt Simple AI Fix Button - show if main pipeline failed validation */}
+                      {taskStatusDetails?.status === 'failed_validation_final_sql_available' && !dryRunSuccess && (
                         <Button
                           variant="outlined"
-                          color="secondary"
+                          color="warning"
+                          onClick={handleAttemptSimpleFix}
+                          disabled={isAttemptingSimpleFix || isDryRunning}
+                          startIcon={isAttemptingSimpleFix ? <CircularProgress size={20} color="inherit" /> : <CodeIcon />}
+                        >
+                          {isAttemptingSimpleFix ? 'Attempting Fix...' : 'Attempt Simple AI Fix'}
+                        </Button>
+                      )}
+
+                      {(generatedSql || simpleFixSql) && (
+                        <Button
+                          variant="outlined"
+                          color="info" // Changed color for better theming or neutrality
                           startIcon={<OpenInNewIcon />}
                           onClick={() => {
                             const projectId = config.projectId;
-                            const encodedSql = encodeURIComponent(generatedSql);
-                            const bqUrl = `https://console.cloud.google.com/bigquery?sq=${encodedSql}&project=${projectId}`;
-                            window.open(bqUrl, '_blank');
+                            const sqlToOpen = simpleFixSql || generatedSql || taskStatusDetails?.result;
+                            if (sqlToOpen && typeof sqlToOpen === 'string' && sqlToOpen.trim() !== "" && projectId && projectId !== 'your-gcp-project-id') {
+                              const encodedSql = encodeURIComponent(sqlToOpen);
+                              const bqUrl = `https://console.cloud.google.com/bigquery?sq=${encodedSql}&project=${projectId}`;
+                              window.open(bqUrl, '_blank');
+                            } else {
+                              console.error("Cannot open in BigQuery Studio: SQL script or Project ID is missing/invalid.", {sqlToOpen, projectId});
+                              setError("Cannot open in BigQuery Studio: SQL script or Project ID is missing or invalid. Please ensure SQL is generated and project is configured.");
+                            }
                           }}
-                          disabled={!generatedSql}
+                          disabled={!(generatedSql || simpleFixSql || taskStatusDetails?.result)} // Ensure there's some SQL to open
                         >
                           Open in BigQuery Studio
                         </Button>
@@ -1319,20 +1455,20 @@ const SourceIngestion = () => {
                   You can use the command: <code>gcloud bq mk --dataset {config.projectId}:products_psearch</code>
                 </Alert>
                 
-                {/* Only show the SQL Error Fix component if there was an error */}
-                {dryRunError && (
+                {/* SqlErrorFix component for iterative fixing if initial dry run fails on generatedSql */}
+                {dryRunError && !simpleFixSql && taskStatusDetails?.status !== 'failed_validation_final_sql_available' && (
                   <SqlErrorFix
-                    originalSql={generatedSql} // The first SQL version
-                    currentSql={generatedSql}  // The current SQL (may be refined in future attempts)
+                    originalSql={generatedSql} 
+                    currentSql={generatedSql} 
                     errorMessage={dryRunError}
-                    onSqlFixed={handleSqlFixed}
-                    attemptNumber={sqlFixAttemptNumber}
-                    maxAttempts={3}
+                    onSqlFixed={handleSqlFixed} // This updates generatedSql and sets dryRunSuccess
+                    attemptNumber={sqlFixAttemptNumber} // This state might need to be managed per SQL version
+                    maxAttempts={3} // Max attempts for the SqlErrorFix component's loop
                   />
                 )}
               </>
             ) : (
-              <Alert severity="warning">No SQL script generated yet. Go back to the previous step.</Alert>
+              <Alert severity="warning">No SQL script generated or task in progress. Go back to the previous step if needed.</Alert>
             )}
           </Box>
         );

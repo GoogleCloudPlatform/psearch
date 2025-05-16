@@ -17,7 +17,8 @@ import os
 import json
 import logging
 import re
-from fastapi import FastAPI, HTTPException, Request, Body
+import uuid # For task IDs, though service might generate them
+from fastapi import FastAPI, HTTPException, Request, Body, BackgroundTasks # Added BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Dict, List, Any, Optional, Union
@@ -26,8 +27,12 @@ from .services.conversational_search_service import ConversationalSearchService
 from .services.enrichment_service import EnrichmentService
 from .services.marketing_service import MarketingService
 from .services.imagen_service import ImageGenerationService
-from .services.sql_transformation_service import SQLTransformationService
+# SQLTransformationService import will be removed
 from .services.sql_fix_service import SQLFixService
+from .tasks import task_manager # Import the task manager
+# Import TransformationPipeline directly
+from .services.sql.pipeline.transformation_pipeline import TransformationPipeline
+from .services.sql.common.schema_utils import SchemaLoader # For default schema access
 
 # Configure logging
 logging.basicConfig(
@@ -76,8 +81,13 @@ conversational_search_service = ConversationalSearchService(project_id, location
 enrichment_service = EnrichmentService(project_id, location)
 marketing_service = MarketingService(project_id, location)
 image_generation_service = ImageGenerationService(project_id, location)
-sql_transformation_service = SQLTransformationService(project_id, location)
-sql_fix_service = SQLFixService(project_id, location)
+# sql_transformation_service instance is removed, will be created per-request or globally if stateless
+sql_fix_service = SQLFixService(project_id, location) 
+# Optionally, create a global pipeline instance if its __init__ is lightweight
+# For now, let's create it per request in the endpoint for simplicity,
+# or it can be initialized globally like other services if preferred.
+# Global instance:
+# transformation_pipeline = TransformationPipeline(project_id, location)
 
 
 # Define request models
@@ -139,6 +149,16 @@ class SQLGenerationRequest(BaseModel):
         ...,
         description="A list of field names available in the source table.",
         example=["id", "title", "description", "price"]
+    )
+    source_data_sample_json: Optional[str] = Field(
+        None,
+        description="Optional JSON string of source data sample for semantic enhancement.",
+        example='[{"product_id": "123", "name": "Sample Product"}]'
+    )
+    critical_fields_to_refine: Optional[List[str]] = Field(
+        None,
+        description="Optional list of critical fields for semantic refinement.",
+        example=["name", "priceInfo.price"]
     )
     
     model_config = {
@@ -447,161 +467,139 @@ async def log_requests(request: Request, call_next):
     "/generate-sql",
     tags=["SQL"],
     summary="Generate SQL transformation script",
-    description="Generates a SQL transformation script to map data from a source table to a destination schema",
-    response_model=Dict[str, str]
+    description="Initiates a background task to generate a SQL transformation script.",
+    response_model=Dict[str, str] 
 )
-async def generate_sql(request: SQLGenerationRequest):
+async def generate_sql_task(request: SQLGenerationRequest, background_tasks: BackgroundTasks):
     """
-    Generate a SQL transformation script to map data from source to destination schema.
+    Initiates a SQL transformation script generation task.
+    The script maps data from a source table to a destination schema.
+    The process runs in the background.
     """
-    logger.info(f"Received SQL generation request: {request.source_table} -> {request.destination_table}")
+    logger.info(f"Received request to generate SQL task: {request.source_table} -> {request.destination_table}")
     
     try:
-        # --- Step 1: Initial Syntactic SQL Generation ---
-        initial_generation_result = sql_transformation_service.generate_sql_transformation(
+        # Instantiate TransformationPipeline here or use a global instance
+        # For this refactor, creating per request to ensure fresh state if any,
+        # though pipeline itself should be mostly stateless beyond its components.
+        # Consider if project_id/location can be derived from a global app config.
+        pipeline = TransformationPipeline(project_id=project_id, location=location) # model_name can be passed if configured
+
+        task_id = str(uuid.uuid4())
+        
+        schema_to_use = request.destination_schema or SchemaLoader.get_destination_schema()
+        if not schema_to_use:
+            raise ValueError("No destination schema provided or loaded. Cannot initiate task.")
+
+        input_details = {
+            "source_table_name": request.source_table,
+            "destination_table_name": request.destination_table,
+            "source_schema_fields_count": len(request.source_schema_fields),
+            "destination_schema_provided": bool(request.destination_schema),
+            "source_data_sample_provided": bool(request.source_data_sample_json),
+        }
+        task_manager.init_task(task_id, task_type="sql_generation", input_details=input_details)
+
+        background_tasks.add_task(
+            pipeline.execute_pipeline,
+            task_id=task_id,
             source_table_name=request.source_table,
             destination_table_name=request.destination_table,
             source_schema_fields=request.source_schema_fields,
-            destination_schema=request.destination_schema
+            destination_schema=schema_to_use, # Pass the resolved schema
+            source_data_sample_json=request.source_data_sample_json,
+            critical_fields_for_semantic_refinement=request.critical_fields_to_refine
+            # max_fix_attempts can be added from request if desired
         )
-        current_sql = initial_generation_result.get("sql_query")
-        if not current_sql:
-            raise ValueError("Initial SQL generation did not return a SQL query.")
-
-        logger.info(f"Initial SQL generated: {current_sql[:200]}...")
         
-        # --- Step 2: Internal Validation & Prep for Semantic Enhancement ---
-        source_data_sample_json = None
-        
-        # Use the new method to identify defaulted fields that need semantic mapping
-        fields_to_semantically_refine = sql_transformation_service.identify_defaulted_fields(current_sql)
-        
-        if fields_to_semantically_refine:
-            logger.info(f"Critical fields defaulted, attempting to fetch source sample for semantic enhancement: {fields_to_semantically_refine}")
-            try:
-                from google.cloud import bigquery
-                # Ensure project_id is available, falling back to environment if service's isn't directly accessible
-                bq_project_id = sql_transformation_service.project_id or os.environ.get("PROJECT_ID")
-                if not bq_project_id:
-                    raise ValueError("Project ID not configured for BigQuery client.")
-                
-                bq_client = bigquery.Client(project=bq_project_id)
-                sample_query = f"SELECT * FROM `{request.source_table}` LIMIT 3" # Use request.source_table which is the full ID
-                logger.info(f"Fetching source data sample with query: {sample_query}")
-                query_job = bq_client.query(sample_query)
-                rows = [dict(row) for row in query_job.result(timeout=30)] # Timeout for safety
-                if rows:
-                    source_data_sample_json = json.dumps(rows, indent=2)
-                    # We already have fields_to_semantically_refine from the identify_defaulted_fields method
-                    logger.info(f"Source data sample fetched successfully. Sample: {source_data_sample_json[:200]}...")
-                else:
-                    logger.warning("No rows returned for source data sample.")
-            except Exception as bq_err:
-                logger.error(f"Failed to fetch source data sample: {bq_err}")
-                # Continue without semantic enhancement if sample fetching fails
-
-        # --- Step 3: Call Semantic Enhancement if needed ---
-        if fields_to_semantically_refine and source_data_sample_json:
-            logger.info(f"Calling semantic enhancement for fields: {fields_to_semantically_refine}")
-            current_sql = sql_transformation_service.semantically_enhance_sql(
-                current_sql_query=current_sql,
-                source_table_name=request.source_table,
-                source_schema_fields=request.source_schema_fields,
-                source_data_sample_json=source_data_sample_json,
-                destination_schema=request.destination_schema,
-                critical_fields_to_refine=fields_to_semantically_refine
-            )
-            logger.info(f"SQL after semantic enhancement: {current_sql[:200]}...")
-        else:
-            logger.info("Skipping semantic enhancement step.")
-
-        # --- Step 4 & 5: BigQuery Dry Run & Iterative Fixing ---
-        max_fix_attempts = 3
-        last_error_message = "SQL script initially passed to validation." # Placeholder for first iteration
-
-        for attempt in range(max_fix_attempts + 1): # +1 to allow initial validation
-            logger.info(f"Attempting BigQuery Dry Run (Attempt {attempt + 1 if attempt < max_fix_attempts else 'Final Validation'}) for SQL: {current_sql[:200]}...")
-            try:
-                validation_result = sql_fix_service.validate_sql(sql_script=current_sql, timeout_seconds=60)
-            except Exception as val_err: # Catch errors from validate_sql itself
-                 logger.error(f"Dry run call failed: {val_err}")
-                 validation_result = {"valid": False, "error": f"Dry run execution failed: {str(val_err)}"}
-
-
-            if validation_result.get("valid"):
-                logger.info("SQL script validated successfully via BigQuery Dry Run.")
-                break # Exit loop if valid
-            
-            last_error_message = validation_result.get("error", "Unknown validation error from BigQuery Dry Run.")
-            logger.warning(f"SQL Dry Run failed: {last_error_message}")
-
-            if attempt < max_fix_attempts:
-                logger.info(f"Attempting AI-powered fix (Attempt {attempt + 1}/{max_fix_attempts}) for error: {last_error_message[:100]}...")
-                try:
-                    current_sql = sql_transformation_service.refine_sql_script(
-                        sql_script=current_sql,
-                        error_message=last_error_message
-                    )
-                    logger.info(f"SQL after fix attempt {attempt + 1}: {current_sql[:200]}...")
-                except Exception as refine_err:
-                    logger.error(f"Call to refine_sql_script failed: {refine_err}")
-                    # If refine_sql_script itself errors, we can't continue this loop path
-                    raise HTTPException(status_code=500, detail=f"Error during SQL refinement process: {str(refine_err)}")
-            else:
-                logger.error(f"Failed to produce valid SQL after {max_fix_attempts} fix attempts. Last error: {last_error_message}")
-                raise HTTPException(status_code=500, detail=f"Failed to produce valid SQL after {max_fix_attempts} fix attempts. Last error: {last_error_message}")
-        
-        # --- Optional: Final Whitespace Cleanup (Contingency) ---
-        # Example: current_sql = current_sql.replace("TABLE\`", "TABLE \`").replace("\`AS", "\` AS")
-        # This should be used cautiously and with robust regex if implemented.
-        # For now, relying on prompt engineering for formatting.
-
         return {
-            "sql_script": current_sql,
-            "source_table": request.source_table,
-            "destination_table": request.destination_table,
-            "message": "SQL script generated and validated successfully." if validation_result.get("valid") else "SQL script generated but failed final validation."
+            "task_id": task_id,
+            "message": "SQL generation task started successfully. Poll /sql/task-status/{task_id} for updates."
         }
         
-    except HTTPException: # Re-raise HTTPExceptions directly
-        raise
+    except ValueError as ve: # Catch specific errors like schema not found
+        logger.error(f"ValueError in generate_sql_task: {str(ve)}")
+        # If task was initiated, mark as failed
+        if 'task_id' in locals() and task_manager.get_task_status(task_id):
+            task_manager.update_task_status(task_id, status="failed", error=str(ve))
+        raise HTTPException(status_code=400, detail=str(ve))
     except Exception as e:
-        logger.error(f"Error in full SQL generation orchestrator: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"An unexpected error occurred during SQL generation: {str(e)}")
+        logger.error(f"Error initiating SQL generation task: {str(e)}", exc_info=True)
+        if 'task_id' in locals() and task_manager.get_task_status(task_id):
+            task_manager.update_task_status(task_id, status="failed", error=f"Unexpected error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred while initiating the SQL generation task: {str(e)}")
 
+
+@app.get("/sql/task-status/{task_id}", tags=["SQL"], summary="Get SQL generation task status", response_model=Optional[Dict[str, Any]])
+async def get_sql_task_status(task_id: str):
+    """
+    Retrieves the status, logs, and result of a SQL generation task.
+    """
+    logger.info(f"Request received for task status: {task_id}")
+    status_info = task_manager.get_task_status(task_id)
+    if not status_info:
+        logger.warning(f"Task ID {task_id} not found.")
+        raise HTTPException(status_code=404, detail=f"Task ID {task_id} not found.")
+    
+    # If task is completed, the 'result' field in task_status should contain the SQL script.
+    # The frontend will expect 'sql_script' if it was previously getting that.
+    # We can adapt the response here or ensure 'result' is named appropriately by the pipeline.
+    # For now, let's assume the frontend will adapt to the 'result' field.
+    return status_info
+
+@app.get("/sql/tasks-summary", tags=["SQL"], summary="Get summary of all SQL generation tasks")
+async def get_all_sql_tasks_summary():
+    """
+    Retrieves a summary list of all tasks managed by the task manager.
+    Useful for debugging or an admin overview.
+    """
+    logger.info("Request received for all tasks summary.")
+    summary = task_manager.get_all_tasks_summary()
+    return summary
+
+# The /refine-sql endpoint was removed. Its functionality is part of the
+# TransformationPipeline (called by /sql/generate-task) or /sql/fix.
+
+class SQLSimpleFixRequest(BaseModel):
+    sql_script: str = Field(..., description="The SQL script to fix.")
+    error_message: str = Field(..., description="The BigQuery error message for the script.")
+    
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "sql_script": "SELECT name FROM `my_table` WHER id = 1;",
+                "error_message": "Syntax error: Expected end of input but got identifier WHER at [1:27]"
+            }
+        }
+    }
 
 @app.post(
-    "/refine-sql",
+    "/sql/simple-fix",
     tags=["SQL"],
-    summary="Refine SQL script with errors",
-    description="Refines an SQL script that has errors based on the error message",
-    response_model=Dict[str, str]
+    summary="Attempt a simple AI fix for an SQL script",
+    description="Uses a simplified prompt to attempt a direct AI fix for a given SQL script and its error message.",
+    response_model=Dict[str, Optional[str]] # Returns {"suggested_fixed_sql": "...", "error": "..."}
 )
-async def refine_sql(request: Dict[str, str]):
-    """
-    Refine an SQL script that has errors based on the error message.
-    """
-    logger.info("Received SQL refinement request")
-    
-    # Validate request
-    if "sql_script" not in request or "error_message" not in request:
-        raise HTTPException(status_code=400, detail="Request must include 'sql_script' and 'error_message'")
-        
+async def simple_sql_fix(request: SQLSimpleFixRequest):
+    logger.info(f"Received simple SQL fix request for error: {request.error_message[:100]}...")
     try:
-        # Refine the SQL script
-        refined_sql = sql_transformation_service.refine_sql_script(
-            sql_script=request["sql_script"],
-            error_message=request["error_message"]
+        # SQLFixService already has an SQLFixer instance which has the simple_fix_sql method
+        fixed_sql, error_msg = sql_fix_service.fixer.simple_fix_sql(
+            sql_script_to_fix=request.sql_script,
+            error_message=request.error_message
         )
         
-        # Return the refined SQL script
-        return {
-            "refined_sql_script": refined_sql
-        }
-        
+        if error_msg:
+            # This means the simple_fix_sql method itself had an issue or couldn't produce SQL
+            logger.error(f"Simple SQL fix attempt failed: {error_msg}")
+            # Return the error from the fix attempt, not necessarily a 500 unless it's an unexpected exception
+            return {"suggested_fixed_sql": None, "error": error_msg}
+
+        return {"suggested_fixed_sql": fixed_sql, "error": None}
+
     except Exception as e:
-        logger.error(f"Error refining SQL script: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error in simple_sql_fix endpoint: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred during simple SQL fix: {str(e)}")
 
 
 @app.post(
@@ -682,7 +680,7 @@ async def validate_sql(request: SQLValidationRequest):
     tags=["SQL"],
     summary="Generate SQL fix",
     description="Generates a fixed SQL script using AI based on error message",
-    response_model=SQLFixResponse,
+    response_model=SQLFixResponse, # SQLFixResponse already includes 'diff'
     responses={
         200: {
             "description": "Generated SQL fix",
@@ -732,13 +730,24 @@ async def fix_sql(request: SQLFixRequest):
     
     try:
         # Generate the fix
-        fix_result = sql_fix_service.generate_sql_fix(
+        fix_result_dict = sql_fix_service.generate_sql_fix(
             request.original_sql,
             request.current_sql,
             request.error_message
         )
         
-        return fix_result
+        # Adapt the result to SQLFixResponse Pydantic model
+        # The 'analysis' dict from the service contains 'diff_text'
+        diff_text = None
+        if fix_result_dict.get("analysis") and isinstance(fix_result_dict["analysis"], dict):
+            diff_text = fix_result_dict["analysis"].get("diff_text")
+
+        return SQLFixResponse(
+            success=fix_result_dict.get("success", False),
+            suggested_sql=fix_result_dict.get("suggested_sql"),
+            diff=diff_text, # Populate the diff field
+            error=fix_result_dict.get("error")
+        )
     
     except Exception as e:
         logger.error(f"Error generating SQL fix: {str(e)}")
@@ -792,7 +801,10 @@ async def analyze_sql_diff(
     logger.info("Analyzing SQL differences")
     
     try:
-        analysis = sql_fix_service.analyze_differences(original_sql, fixed_sql)
+        # The SQLFixService needs to expose analyze_differences or use its DiffAnalyzer directly
+        # Assuming SQLFixService is updated to have an analyze_sql_differences method
+        # that calls its internal diff_analyzer.
+        analysis = sql_fix_service.diff_analyzer.analyze_sql_differences(original_sql, fixed_sql)
         return analysis
     
     except Exception as e:

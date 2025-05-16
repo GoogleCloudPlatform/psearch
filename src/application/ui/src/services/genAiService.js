@@ -262,12 +262,17 @@ export const generateTransformationSql = async (sourceTableId, destinationTableI
     
     console.log(`Using source schema fields: ${fieldsToUse.join(', ')}`);
 
-    const response = await axios.post(`${GEN_AI_URL}/generate-sql`, {
+    const payload = {
       source_table: fullSourceTableId,
       destination_table: fullDestinationTableId,
       destination_schema: productSchema, // Send the imported JSON schema
-      source_schema_fields: fieldsToUse  // Include the source schema fields
-    }, {
+      source_schema_fields: fieldsToUse,  // Include the source schema fields
+      source_data_sample_json: null, // Pass null for new optional field
+      critical_fields_to_refine: null // Pass null for new optional field
+    };
+    console.log("Payload for /generate-sql:", payload);
+
+    const response = await axios.post(`${GEN_AI_URL}/generate-sql`, payload, { // Endpoint name will be changed to /sql/generate-task in main.py. Corrected axios config.
       timeout: 300000, // 300 second (5 minute) timeout for complex SQL generation
       headers: {
         'Content-Type': 'application/json',
@@ -275,54 +280,18 @@ export const generateTransformationSql = async (sourceTableId, destinationTableI
       }
     });
 
-    // Validate response data
-    if (!response.data || !response.data.sql_script) {
-      console.error("Invalid response from /generate-sql:", response.data);
-      throw new Error('Incomplete or invalid SQL script data received from AI service');
+    // The backend now returns a task initiation response, not the SQL script directly.
+    // Example: { "task_id": "some-uuid", "message": "SQL generation task started." }
+    if (!response.data || !response.data.task_id) {
+      console.error("Invalid response from /generate-sql (expected task_id):", response.data);
+      throw new Error('Failed to initiate SQL generation task. No task_id received.');
     }
 
-    console.log("Generated SQL script received.");
-    
-    // Process the SQL script to ensure it's properly formatted for display
-    let sqlScript = response.data.sql_script.trim();
-    
-    // Remove any markdown code formatting that might have slipped through
-    if (sqlScript.startsWith("```") && sqlScript.endsWith("```")) {
-      sqlScript = sqlScript.substring(3, sqlScript.length - 3).trim();
-      // Also remove any language identifier like "sql"
-      if (sqlScript.startsWith("sql") || sqlScript.startsWith("SQL")) {
-        sqlScript = sqlScript.substring(3).trim();
-      }
-    }
-    
-    // Enhanced SQL Formatting and Whitespace Normalization
-    
-    // 1. Normalize spaces around operators and parentheses
-    sqlScript = sqlScript.replace(/\s*([=<>!(),])\s*/g, ' $1 '); // Add space around operators and parentheses/commas
-    sqlScript = sqlScript.replace(/\s*(\bAS\b|\bAND\b|\bOR\b|\bSELECT\b|\bFROM\b|\bWHERE\b|\bLEFT JOIN\b|\bRIGHT JOIN\b|\bINNER JOIN\b|\bON\b|\bGROUP BY\b|\bORDER BY\b|\bLIMIT\b|\bOFFSET\b|\bUNION ALL\b|\bUNION\b|\bINTERSECT\b|\bEXCEPT\b)\s*/gi, ' $1 ');
-
-    // 2. Fix backtick issues: ``table`` to `table`, and ensure `project.dataset.table` is correctly quoted.
-    sqlScript = sqlScript.replace(/``([^`]+)``/g, '`$1`'); // ``table`` -> `table`
-    sqlScript = sqlScript.replace(/`\s*([^`\s]+)\s*`/g, '`$1`'); // ` table ` -> `table`
-    
-    // 3. Ensure project.dataset.table has proper quoting without internal spaces
-    const tableRefPattern = /`?\s*([a-zA-Z0-9_-]+)\s*\.\s*([a-zA-Z0-9_-]+)\s*\.\s*([a-zA-Z0-9_-]+)\s*`?/g;
-    sqlScript = sqlScript.replace(tableRefPattern, (match, project, dataset, table) => {
-      return `\`${project.trim()}.${dataset.trim()}.${table.trim()}\``;
-    });
-
-    // 4. Consolidate multiple spaces into single spaces, but not inside string literals
-    // This is a bit tricky with regex. A simpler approach for now:
-    sqlScript = sqlScript.replace(/\s\s+/g, ' ');
-    
-    // 5. Trim whitespace from each line and the overall script again
-    sqlScript = sqlScript.split('\n').map(line => line.trim()).join('\n').trim();
-    
-    console.log("Processed SQL script ready for display:", sqlScript.substring(0, 100) + "...");
-    return sqlScript; // Return the cleaned SQL string
+    console.log("SQL generation task initiated:", response.data);
+    return response.data; // Return the task initiation response {task_id, message}
 
   } catch (error) {
-    console.error('Error generating transformation SQL:', error);
+    console.error('Error generating transformation SQL task:', error);
 
     // Enhance error message based on error type
     if (error.code === 'ECONNABORTED') {
@@ -380,6 +349,40 @@ export const refineTransformationSql = async (sqlScript, errorMessage) => {
     console.error('Error refining transformation SQL:', error);
     const message = error.response?.data?.detail || error.message || "An unknown error occurred during SQL refinement.";
     throw new Error(`SQL Refinement Failed: ${message}`);
+  }
+};
+
+// The refineTransformationSql function is removed as its functionality is now part of the
+// main /generate-sql pipeline (which includes validation and fixing steps)
+// and the more specific /sql/fix endpoint handled by generateSqlFix.
+
+export const getSqlTaskStatus = async (taskId) => {
+  console.log(`Fetching status for SQL task ID: ${taskId}`);
+  try {
+    const response = await axios.get(`${GEN_AI_URL}/sql/task-status/${taskId}`, {
+      timeout: 10000, // 10 second timeout for status checks
+      headers: {
+        'Accept': 'application/json'
+      }
+    });
+    if (!response.data) {
+      throw new Error("No data received from task status endpoint");
+    }
+    console.log(`Status for task ${taskId}:`, response.data.status);
+    return response.data; // Returns the full task object {task_id, status, logs, result, error,...}
+  } catch (error) {
+    console.error(`Error fetching status for task ${taskId}:`, error);
+    let errorMessage = `Failed to get task status for ${taskId}: `;
+    if (error.response) {
+      const status = error.response.status;
+      const detail = error.response.data?.detail || "Unknown server error";
+      errorMessage += `Server error (${status}): ${detail}`;
+    } else if (error.request) {
+      errorMessage += "No response received from server.";
+    } else {
+      errorMessage += error.message || "Unknown error";
+    }
+    throw new Error(errorMessage);
   }
 };
 
@@ -544,6 +547,45 @@ export const analyzeSqlDifferences = async (originalSql, fixedSql) => {
     throw new Error(errorMessage);
   }
 };
+
+/**
+ * Calls the backend to attempt a simple fix on an SQL script using only the script and error.
+ * @param {string} sqlScript The SQL script that failed.
+ * @param {string} errorMessage The error message from BigQuery.
+ * @returns {Promise<Object>} Object like { suggested_fixed_sql: "...", error: "..." }
+ */
+export const getSimpleSqlFix = async (sqlScript, errorMessage) => {
+  console.log("Requesting simple SQL fix for error:", errorMessage.substring(0,100) + "...");
+  try {
+    const response = await axios.post(`${GEN_AI_URL}/sql/simple-fix`, {
+      sql_script: sqlScript,
+      error_message: errorMessage
+    }, {
+      timeout: 180000, // 3 minute timeout
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      }
+    });
+    if (!response.data) {
+      throw new Error("No data received from simple SQL fix service");
+    }
+    console.log("Simple SQL fix attempt result:", response.data);
+    return response.data; // Expected: { suggested_fixed_sql: "...", error: "..." }
+  } catch (error) {
+    console.error("Error requesting simple SQL fix:", error);
+    let errorMsg = "Failed to get simple SQL fix: ";
+    if (error.response) {
+      errorMsg += `Server error (${error.response.status}): ${error.response.data?.detail || "Unknown server error"}`;
+    } else if (error.request) {
+      errorMsg += "No response from server.";
+    } else {
+      errorMsg += error.message || "Unknown error";
+    }
+    throw new Error(errorMsg);
+  }
+};
+
 
 // Old function to generate images (removed as it's replaced by generateEnhancedImage)
 /*

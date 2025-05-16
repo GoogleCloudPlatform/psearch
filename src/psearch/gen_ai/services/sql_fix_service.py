@@ -15,287 +15,158 @@
 
 import logging
 import os
-import difflib
-import json
-from typing import Dict, Any, Optional, List, Union
+import json # For example usage
+from typing import Dict, Any, Optional
 
-from google.cloud import bigquery
-from google.api_core.exceptions import BadRequest
-from google import genai
-from google.genai.types import GenerateContentConfig, FunctionDeclaration, Tool, Content, Part
+# Import new modular components
+from .sql.validation.sql_validator import SQLValidator
+from .sql.fixing.sql_fixer import SQLFixer
+from .sql.analysis.diff_analyzer import DiffAnalyzer
 
-# Import SQLTransformationService directly
-from .sql_transformation_service import SQLTransformationService
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Configure logging - ensure this is configured at a higher level (e.g., main.py or service entry)
+# If not, uncomment and configure here. For now, assume it's handled.
+# logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class SQLFixService:
-    """Service for fixing SQL errors using GenAI."""
+    """
+    Service for validating and fixing SQL errors using refactored components.
+    """
     
-    def __init__(self, project_id: str, location: str = "us-central1"):
-        """Initialize the SQL Fix service.
+    def __init__(self, project_id: str, location: str = "us-central1", model_name: Optional[str] = None, use_genai_for_diff_analysis: bool = True):
+        """
+        Initialize the SQL Fix service with refactored components.
         
         Args:
-            project_id: The Google Cloud Project ID
-            location: The GCP region (e.g., us-central1)
+            project_id: The Google Cloud Project ID.
+            location: The GCP region (e.g., us-central1).
+            model_name: Optional. The Gemini model name for fixer and analyzer.
+            use_genai_for_diff_analysis: Whether the DiffAnalyzer should use GenAI.
         """
         self.project_id = project_id
         self.location = location
-        self.bigquery_client = bigquery.Client(project=project_id)
-        
-        # Initialize GenAI client
-        self.client = genai.Client(
-            vertexai=True,
-            project=project_id,
-            location=location,
+        self.model_name = model_name # Will be passed to components that need it
+
+        self.validator = SQLValidator(project_id=self.project_id)
+        self.fixer = SQLFixer(
+            project_id=self.project_id,
+            location=self.location,
+            model_name=self.model_name
+        )
+        self.diff_analyzer = DiffAnalyzer(
+            project_id=self.project_id if use_genai_for_diff_analysis else None,
+            location=self.location if use_genai_for_diff_analysis else None,
+            model_name=self.model_name if use_genai_for_diff_analysis else None,
+            use_genai_for_analysis=use_genai_for_diff_analysis
         )
         
-        # Set model name for Gemini from environment or use default
-        self.model = os.environ.get("GEMINI_MODEL", "gemini-2.5-pro-preview-03-25")
-        
-        # Initialize the SQL Transformation Service
-        try:
-            self.sql_service = SQLTransformationService(project_id, location)
-            logger.info(f"SQL Fix Service initialized: {project_id}/{location}")
-        except Exception as e:
-            logger.error(f"Error initializing SQL Transformation Service: {str(e)}")
-            raise
-    
+        logger.info(f"SQL Fix Service initialized: {project_id}/{location}. GenAI for diff analysis: {use_genai_for_diff_analysis}")
+
     def validate_sql(self, sql_script: str, timeout_seconds: int = 30) -> Dict[str, Any]:
-        """Perform a dry run of a SQL query to validate it.
+        """
+        Perform a dry run of a SQL query to validate it using the SQLValidator component.
         
         Args:
-            sql_script: The SQL script to validate
-            timeout_seconds: Timeout for the dry run in seconds
+            sql_script: The SQL script to validate.
+            timeout_seconds: Timeout for the dry run in seconds.
             
         Returns:
-            A dictionary containing validation results
+            A dictionary containing validation results from SQLValidator.
         """
-        logger.info("Validating SQL with dry run")
-        
-        try:
-            # Configure job for dry run
-            job_config = bigquery.QueryJobConfig(
-                dry_run=True,
-                use_query_cache=False
-            )
-            
-            # Start dry run
-            query_job = self.bigquery_client.query(
-                sql_script,
-                job_config=job_config,
-                timeout=timeout_seconds * 1000
-            )
-            
-            # If we get here, the query is valid
-            return {
-                "valid": True,
-                "message": f"SQL syntax validated successfully (Estimated bytes: {query_job.total_bytes_processed:,})",
-                "details": {
-                    "estimated_bytes_processed": query_job.total_bytes_processed,
-                }
-            }
-            
-        except BadRequest as e:
-            # Handle BigQuery syntax and semantic errors
-            logger.error(f"SQL validation error: {str(e)}")
-            
-            # Process error message for better user feedback
-            error_message = str(e)
-            error_details = {}
-            
-            # Extract specific field names for field reference errors
-            missing_field = None
-            if "Invalid field reference" in error_message:
-                import re
-                field_match = re.search(r"Invalid field reference '([^']+)'", error_message)
-                if field_match:
-                    missing_field = field_match.group(1)
-                    error_details["missing_field"] = missing_field
-            
-            return {
-                "valid": False,
-                "error": error_message,
-                "details": error_details if error_details else None
-            }
-        
-        except Exception as e:
-            # Handle all other errors
-            logger.error(f"Error performing SQL dry run: {str(e)}", exc_info=True)
-            
-            # Format error message more user-friendly if possible
-            error_message = str(e)
-            error_type = type(e).__name__
-            
-            return {
-                "valid": False,
-                "error": f"Error performing SQL validation: {error_message}",
-                "details": {"error_type": error_type}
-            }
+        logger.info(f"SQLFixService: Validating SQL (timeout: {timeout_seconds}s).")
+        return self.validator.validate_sql_dry_run(sql_script, timeout_seconds)
     
     def generate_sql_fix(self, 
-                         original_sql: str, 
-                         current_sql: str,
+                         original_sql: str, # Kept for context, though fixer might not directly use it
+                         current_sql_that_failed: str,
                          error_message: str) -> Dict[str, Any]:
-        """Generate a fixed SQL script using Gemini.
+        """
+        Generate a fixed SQL script using the SQLFixer component and analyze differences.
         
         Args:
-            original_sql: The original SQL that started the fix process
-            current_sql: The current SQL version (might be a previous fix attempt)
-            error_message: The error message from the failed validation
+            original_sql: The original SQL that started the fix process (for context/diff).
+            current_sql_that_failed: The current SQL version that failed validation.
+            error_message: The error message from the failed validation.
             
         Returns:
-            A dictionary containing the fixed SQL and diff
+            A dictionary containing the suggested fixed SQL, diff analysis, and success status.
         """
-        logger.info(f"Generating SQL fix for error: {error_message[:100]}...")
+        logger.info(f"SQLFixService: Generating SQL fix for error: {error_message[:100]}...")
         
-        try:
-            # Use the SQLTransformationService's refine_sql_script method
-            suggested_sql = self.sql_service.refine_sql_script(current_sql, error_message)
-            
-            # Generate diff
-            diff_lines = list(difflib.unified_diff(
-                current_sql.splitlines(),
-                suggested_sql.splitlines(),
-                fromfile='current.sql',
-                tofile='suggested.sql',
-                lineterm='',
-                n=3  # Context lines
-            ))
-            diff_text = '\n'.join(diff_lines)
-            
-            # Use our analyze_differences method to get a detailed analysis
-            analysis = self.analyze_differences(current_sql, suggested_sql)
-            
-            return {
-                "success": True,
-                "suggested_sql": suggested_sql,
-                "diff": diff_text,
-                "changes": analysis.get("changes", [])
-            }
-            
-        except Exception as e:
-            logger.error(f"Error generating SQL fix: {str(e)}")
+        suggested_sql, fix_err_msg = self.fixer.fix_sql(current_sql_that_failed, error_message)
+        
+        if fix_err_msg or not suggested_sql:
+            logger.error(f"SQLFixer failed to generate a fix: {fix_err_msg or 'No SQL returned'}")
             return {
                 "success": False,
-                "error": f"Failed to generate SQL fix: {str(e)}"
+                "error": f"SQLFixer component failed: {fix_err_msg or 'No SQL returned'}",
+                "suggested_sql": None,
+                "analysis": None
             }
-    
-    def analyze_differences(self, original_sql: str, fixed_sql: str) -> Dict[str, Any]:
-        """Analyze and explain the differences between the original and fixed SQL.
         
-        Args:
-            original_sql: The original SQL with errors
-            fixed_sql: The fixed SQL
-            
-        Returns:
-            A dictionary with analysis of the differences
-        """
-        # Define the analysis schema for function calling
-        analysis_schema = FunctionDeclaration(
-            name="sql_diff_analysis",
-            description="Analyzes differences between original and fixed SQL scripts",
-            parameters={
-                "type": "OBJECT",
-                "properties": {
-                    "changes": {
-                        "type": "ARRAY",
-                        "items": {"type": "STRING"},
-                        "description": "List of significant changes made in the fixed SQL"
-                    },
-                    "primary_issue_type": {
-                        "type": "STRING",
-                        "description": "The main type of issue that was fixed (e.g., 'missing field', 'syntax error', 'backtick formatting')"
-                    },
-                    "removed_lines_count": {
-                        "type": "INTEGER",
-                        "description": "Number of lines removed in the fix"
-                    },
-                    "added_lines_count": {
-                        "type": "INTEGER",
-                        "description": "Number of lines added in the fix"
-                    }
-                },
-                "required": ["changes", "primary_issue_type"]
-            }
+        logger.info("SQLFixer provided a suggested SQL. Analyzing differences...")
+        # Analyze differences between the script that failed and the new suggestion
+        analysis = self.diff_analyzer.analyze_sql_differences(current_sql_that_failed, suggested_sql)
+        
+        return {
+            "success": True,
+            "suggested_sql": suggested_sql,
+            "analysis": analysis # Contains diff_text and other analysis fields
+        }
+
+# Example of how this refactored service might be used:
+if __name__ == '__main__':
+    # Ensure GOOGLE_APPLICATION_CREDENTIALS and GOOGLE_CLOUD_PROJECT are set
+    logging.basicConfig(level=logging.DEBUG) 
+    
+    gcp_project_id = os.environ.get("GOOGLE_CLOUD_PROJECT")
+    if not gcp_project_id:
+        logger.error("GOOGLE_CLOUD_PROJECT environment variable is not set. Cannot run example.")
+    else:
+        # Initialize with GenAI for diff analysis
+        fix_service_with_genai_diff = SQLFixService(
+            project_id=gcp_project_id, 
+            location="us-central1",
+            use_genai_for_diff_analysis=True
         )
         
-        analysis_tool = Tool(function_declarations=[analysis_schema])
-        
-        # Generate line-by-line diff for the prompt
-        diff_lines = list(difflib.unified_diff(
-            original_sql.splitlines(),
-            fixed_sql.splitlines(),
-            lineterm='',
-        ))
-        diff_text = '\n'.join(diff_lines)
-        
-        # Build the prompt for analysis
-        prompt = f"""You are an expert SQL analyst. Analyze the differences between the original and fixed SQL scripts.
+        # Initialize without GenAI for diff analysis (basic diff only)
+        fix_service_basic_diff = SQLFixService(
+            project_id=gcp_project_id,
+            location="us-central1",
+            use_genai_for_diff_analysis=False
+        )
 
-ORIGINAL SQL:
-{original_sql}
+        test_original_sql = "SELECT name, price FROM products_source_table WHERE category = 'electronics';"
+        test_failed_sql = "SELECT name, price FROM products_source_table WHER category = 'electronics';" # Typo: WHER
+        test_error_message = "Syntax error: Expected keyword OR or AND but got identifier \"category\" at [1:43]"
 
-FIXED SQL:
-{fixed_sql}
+        print("\n--- Testing SQLFixService (with GenAI Diff Analysis) ---")
+        fix_result_genai_diff = fix_service_with_genai_diff.generate_sql_fix(
+            original_sql=test_original_sql,
+            current_sql_that_failed=test_failed_sql,
+            error_message=test_error_message
+        )
+        print(f"Fix Result (GenAI Diff): {json.dumps(fix_result_genai_diff, indent=2)}")
+        if fix_result_genai_diff["success"] and fix_result_genai_diff["analysis"]:
+            print(f"\nDiff Text (from GenAI Diff Analysis):\n{fix_result_genai_diff['analysis'].get('diff_text')}")
 
-DIFF:
-{diff_text}
 
-Provide a detailed analysis of the significant changes made between the scripts.
-Specifically focus on:
-1. Field replacements (e.g., source.field -> NULL)
-2. Syntax corrections (e.g., backtick usage, spacing)
-3. Value handling (e.g., adding IFNULL, default values)
-4. Structural changes (e.g., whole sections added or removed)
+        print("\n--- Testing SQLFixService (with Basic Diff Analysis) ---")
+        fix_result_basic_diff = fix_service_basic_diff.generate_sql_fix(
+            original_sql=test_original_sql,
+            current_sql_that_failed=test_failed_sql,
+            error_message=test_error_message
+        )
+        print(f"Fix Result (Basic Diff): {json.dumps(fix_result_basic_diff, indent=2)}")
+        if fix_result_basic_diff["success"] and fix_result_basic_diff["analysis"]:
+            print(f"\nDiff Text (from Basic Diff Analysis):\n{fix_result_basic_diff['analysis'].get('diff_text')}")
 
-Your response must follow the exact structure defined in the function schema.
-"""
-        
-        try:
-            # Create content structure for prompt
-            contents = [Content(role="user", parts=[Part.from_text(text=prompt)])]
-            
-            # Set up generation configuration with our tool
-            generate_content_config = GenerateContentConfig(
-                temperature=0.2,
-                max_output_tokens=2048,
-                top_p=0.95,
-                top_k=40,
-                tools=[analysis_tool]
-            )
-            
-            # Generate content
-            response = self.client.models.generate_content(
-                model=self.model,
-                contents=contents,
-                config=generate_content_config,
-            )
-            
-            # Extract the structured function response
-            function_response = response.candidates[0].content.parts[0].function_call
-            result = json.loads(function_response.args["sql_diff_analysis"])
-            
-            # Log the analysis results
-            logger.info(f"SQL diff analysis: Primary issue type: {result.get('primary_issue_type', 'unknown')}")
-            for change in result.get("changes", []):
-                logger.info(f"SQL analysis change: {change}")
-            
-            # Also add the diff text to the result
-            result["diff"] = diff_text
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"Error analyzing SQL differences: {str(e)}")
-            # Fallback to basic diff analysis
-            basic_diff = {
-                "diff": diff_text,
-                "changes": ["SQL structure was modified"],
-                "primary_issue_type": "unknown",
-                "removed_lines_count": len([line for line in diff_lines if line.startswith('-') and not line.startswith('---')]),
-                "added_lines_count": len([line for line in diff_lines if line.startswith('+') and not line.startswith('+++')])
-            }
-            return basic_diff
+        print("\n--- Testing SQL Validation via SQLFixService ---")
+        valid_sql_script = "SELECT 1 AS test_column;"
+        validation_output = fix_service_with_genai_diff.validate_sql(valid_sql_script)
+        print(f"Validation of '{valid_sql_script}': {json.dumps(validation_output, indent=2)}")
+
+        invalid_sql_script = "SELEC 1 AS test_column;" # Typo
+        validation_output_invalid = fix_service_with_genai_diff.validate_sql(invalid_sql_script)
+        print(f"Validation of '{invalid_sql_script}': {json.dumps(validation_output_invalid, indent=2)}")
