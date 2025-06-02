@@ -80,6 +80,10 @@ resource "google_project_iam_member" "bq_connection_sa_vertex_user" {
   project = var.project_id
   role    = "roles/vertexai.user"
   member  = "serviceAccount:${google_bigquery_connection.vertex_ai_connection.cloud_resource.0.service_account_id}"
+
+  depends_on = [
+    google_bigquery_connection.vertex_ai_connection
+  ]
 }
 
 resource "google_bigquery_reservation" "export_reservation" {
@@ -127,7 +131,6 @@ resource "null_resource" "create_embedding_model_via_gcloud" {
   depends_on = [
     google_bigquery_dataset.psearch_raw_dataset,
     google_bigquery_dataset.psearch_dataset,
-    google_bigquery_connection.vertex_ai_connection,
     google_project_iam_member.bq_connection_sa_vertex_user,
     google_bigquery_reservation_assignment.project_export_assignment
   ]
