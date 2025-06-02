@@ -78,7 +78,7 @@ resource "google_bigquery_connection_iam_member" "connection_user" {
 # This allows the connection to call Vertex AI endpoints.
 resource "google_project_iam_member" "bq_connection_sa_vertex_user" {
   project = var.project_id
-  role    = "roles/aiplatform.user"
+  role    = "roles/vertexai.user"
   member  = "serviceAccount:${google_bigquery_connection.vertex_ai_connection.cloud_resource.0.service_account_id}"
 }
 
@@ -133,12 +133,10 @@ resource "null_resource" "create_embedding_model_via_gcloud" {
   ]
 }
 
-# Create BigQuery Stored Procedure for Spanner Export
 resource "null_resource" "create_spanner_export_procedure" {
   triggers = {
     sql_content = filemd5("${path.module}/../../bigquery_scripts/transform_embed_export_to_spanner.sql")
     project_id  = var.project_id
-    # Add other triggers if the procedure depends on them, e.g., dataset ID
   }
 
   provisioner "local-exec" {
@@ -151,23 +149,20 @@ resource "null_resource" "create_spanner_export_procedure" {
   }
 
   depends_on = [
-    google_bigquery_dataset.psearch_dataset,        # Ensure psearch dataset exists for the procedure
-    null_resource.create_embedding_model_via_gcloud # Ensure embedding model exists if procedure uses it
+    google_bigquery_dataset.psearch_dataset,
+    null_resource.create_embedding_model_via_gcloud
   ]
 }
-
-# Create BigQuery scheduled query for Spanner export
 resource "google_bigquery_data_transfer_config" "spanner_export_schedule" {
   project                = var.project_id
   location               = var.region
   display_name           = "${local.service_name}-spanner-export"
   data_source_id         = "scheduled_query"
   schedule               = "every 1 hours"
-  destination_dataset_id = null # Not needed when calling a procedure that handles its own destination or DML/DDL
+  destination_dataset_id = null
 
   params = {
     query = "CALL psearch.transform_and_export_to_spanner('${var.project_id}', '${var.spanner_instance_id}', '${var.spanner_database_id}');"
-    # write_disposition = "WRITE_TRUNCATE" # This should be removed as per the error
   }
 
   service_account_name = var.bq_dt_service_account_email
@@ -176,6 +171,6 @@ resource "google_bigquery_data_transfer_config" "spanner_export_schedule" {
     null_resource.create_embedding_model_via_gcloud,
     google_bigquery_dataset.psearch_raw_dataset,
     google_bigquery_reservation_assignment.project_export_assignment,
-    null_resource.create_spanner_export_procedure # Add dependency on the procedure creation
+    null_resource.create_spanner_export_procedure
   ]
 }
