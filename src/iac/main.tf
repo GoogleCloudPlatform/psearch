@@ -81,6 +81,14 @@ module "iam" {
 }
 
 
+resource "time_sleep" "wait_for_iam" {
+  create_duration = "60s"
+
+  depends_on = [
+    module.iam
+  ]
+}
+
 module "spanner" {
   source                = "./modules/spanner"
   project_id            = var.project_id
@@ -91,7 +99,7 @@ module "spanner" {
   environment           = "development"
 
   depends_on = [
-    module.iam
+    time_sleep.wait_for_iam
   ]
 }
 
@@ -144,7 +152,7 @@ module "gen_ai" {
   service_account_email = module.iam.ingestion_service_account_email # TODO: Create a new Service Account for this service
 
   depends_on = [
-    module.iam
+    time_sleep.wait_for_iam
   ]
 }
 
@@ -155,6 +163,6 @@ module "ingestion_source" {
   service_account_email = module.iam.ingestion_service_account_email # TODO: Create a new Service Account for this service
 
   depends_on = [
-    module.iam
+    time_sleep.wait_for_iam
   ]
 }

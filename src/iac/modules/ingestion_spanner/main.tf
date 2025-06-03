@@ -74,15 +74,23 @@ resource "google_bigquery_connection_iam_member" "connection_user" {
   member        = "serviceAccount:${var.bq_dt_service_account_email}"
 }
 
+resource "time_sleep" "connection_propagation_delay" {
+  create_duration = "60s"
+
+  depends_on = [
+    google_bigquery_connection_iam_member.connection_user
+  ]
+}
+
 # Grant the BQ Connection's own service account roles/vertexai.user
 # This allows the connection to call Vertex AI endpoints.
 resource "google_project_iam_member" "bq_connection_sa_vertex_user" {
   project = var.project_id
-  role    = "roles/vertexai.user"
+  role    = "roles/aiplatform.user"
   member  = "serviceAccount:${google_bigquery_connection.vertex_ai_connection.cloud_resource.0.service_account_id}"
 
   depends_on = [
-    google_bigquery_connection.vertex_ai_connection
+    time_sleep.connection_propagation_delay
   ]
 }
 
