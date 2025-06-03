@@ -86,6 +86,14 @@ resource "google_project_iam_member" "bq_connection_sa_vertex_user" {
   ]
 }
 
+resource "time_sleep" "iam_propagation_delay" {
+  create_duration = "60s"
+
+  depends_on = [
+    google_project_iam_member.bq_connection_sa_vertex_user
+  ]
+}
+
 resource "google_bigquery_reservation" "export_reservation" {
   project           = var.project_id
   location          = var.region
@@ -131,7 +139,7 @@ resource "null_resource" "create_embedding_model_via_gcloud" {
   depends_on = [
     google_bigquery_dataset.psearch_raw_dataset,
     google_bigquery_dataset.psearch_dataset,
-    google_project_iam_member.bq_connection_sa_vertex_user,
+    time_sleep.iam_propagation_delay,
     google_bigquery_reservation_assignment.project_export_assignment
   ]
 }
