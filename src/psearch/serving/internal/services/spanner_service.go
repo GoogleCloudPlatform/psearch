@@ -213,7 +213,7 @@ func (s *SpannerService) HybridSearch(ctx context.Context, query string, limit i
 			return nil, fmt.Errorf("error iterating through search results: %v", err)
 		}
 
-		var productIDInt int64
+		var productIDInt string
 		var title string
 		var productDataJSON spanner.NullJSON
 		var hybridScore float64
