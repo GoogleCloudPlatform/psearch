@@ -75,7 +75,7 @@ resource "google_bigquery_connection_iam_member" "connection_user" {
 }
 
 resource "time_sleep" "connection_propagation_delay" {
-  create_duration = "60s"
+  create_duration = "180s"
 
   depends_on = [
     google_bigquery_connection_iam_member.connection_user
@@ -95,7 +95,7 @@ resource "google_project_iam_member" "bq_connection_sa_vertex_user" {
 }
 
 resource "time_sleep" "iam_propagation_delay" {
-  create_duration = "60s"
+  create_duration = "180s"
 
   depends_on = [
     google_project_iam_member.bq_connection_sa_vertex_user
