@@ -7,7 +7,7 @@
     "@emotion/styled": "^11.11.0",
     "@google-cloud/firestore": "^7.1.0",
     "@mui/icons-material": "^7.0.0",
-    "@mui/lab": "^5.0.0-alpha.165",
+    "@mui/lab": "^7.0.0",
     "@mui/material": "^7.0.0",
     "axios": "^1.6.7",
     "http-proxy-middleware": "^3.0.0",
