@@ -14,7 +14,7 @@
 # limitations under the License.
 
 # Use Python 3.9 slim image
-FROM python:3.13-slim
+FROM python:3.14-slim
 
 # Set working directory
 WORKDIR /app
