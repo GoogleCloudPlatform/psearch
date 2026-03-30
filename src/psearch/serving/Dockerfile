@@ -15,7 +15,7 @@
 
 # ---- Build Stage ----
 # Use the Go version confirmed to work with dependencies
-FROM golang:1.24-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 # Install build dependencies (git for private modules if needed, ca-certs for https downloads)
 RUN apk add --no-cache git ca-certificates
