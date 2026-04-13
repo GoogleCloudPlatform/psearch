@@ -1,5 +1,5 @@
 google-cloud-bigquery==3.40.1
-google-cloud-firestore==2.26.0
+google-cloud-firestore==2.27.0
 google-cloud-storage==3.10.1
 pandas==3.0.1
 python-dotenv==1.2.2
