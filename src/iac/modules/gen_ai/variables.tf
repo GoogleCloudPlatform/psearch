@@ -57,3 +57,15 @@ variable "timeout_seconds" {
   type        = number
   default     = 300 # 5 minutes timeout
 }
+
+variable "invoker_members" {
+  description = <<-EOT
+    IAM principals granted roles/run.invoker on the Gen AI service.
+    Defaults to ["allUsers"] for backwards compatibility, which leaves
+    /generate-sql anonymously reachable. Override with the UI service account
+    (e.g. ["serviceAccount:ui-sa@PROJECT.iam.gserviceaccount.com"]) in any
+    environment where billable Gemini/BigQuery calls must not be public.
+  EOT
+  type        = list(string)
+  default     = ["allUsers"]
+}
