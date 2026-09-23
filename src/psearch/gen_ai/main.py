@@ -20,7 +20,7 @@ import re
 import uuid # For task IDs, though service might generate them
 from fastapi import FastAPI, HTTPException, Request, Body, BackgroundTasks # Added BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
 from typing import Dict, List, Any, Optional, Union
 
 from .services.conversational_search_service import ConversationalSearchService
@@ -33,6 +33,15 @@ from .tasks import task_manager # Import the task manager
 # Import TransformationPipeline directly
 from .services.sql.pipeline.transformation_pipeline import TransformationPipeline
 from .services.sql.common.schema_utils import SchemaLoader # For default schema access
+from .services.sql.common.input_validation import (
+    # These raise InputValidationError (a ValueError), which pydantic turns into
+    # a 422 response before the request handler ever runs.
+    sanitize_data_sample_json,
+    validate_critical_fields,
+    validate_destination_schema,
+    validate_source_schema_fields,
+    validate_table_id,
+)
 
 # Configure logging
 logging.basicConfig(
@@ -131,6 +140,14 @@ class EnhancedImageRequest(BaseModel):
 
 
 class SQLGenerationRequest(BaseModel):
+    """Request body for POST /generate-sql.
+
+    Every field here is attacker-controlled and ends up in an LLM prompt and in
+    BigQuery API calls, so each one is validated against a strict allow-list
+    before the request is accepted. See
+    ``services/sql/common/input_validation.py`` for the grammars and rationale.
+    """
+
     source_table: str = Field(
         ..., 
         description="The source BigQuery table ID (e.g., project.dataset.table)",
@@ -160,6 +177,33 @@ class SQLGenerationRequest(BaseModel):
         description="Optional list of critical fields for semantic refinement.",
         example=["name", "priceInfo.price"]
     )
+
+    @field_validator("source_table", "destination_table")
+    @classmethod
+    def _check_table_id(cls, value: str, info: ValidationInfo) -> str:
+        return validate_table_id(value, info.field_name)
+
+    @field_validator("source_schema_fields")
+    @classmethod
+    def _check_source_schema_fields(cls, value: List[str]) -> List[str]:
+        return validate_source_schema_fields(value)
+
+    @field_validator("critical_fields_to_refine")
+    @classmethod
+    def _check_critical_fields(cls, value: Optional[List[str]]) -> Optional[List[str]]:
+        return validate_critical_fields(value) or None
+
+    @field_validator("destination_schema")
+    @classmethod
+    def _check_destination_schema(cls, value: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if value is None:
+            return None
+        return validate_destination_schema(value)
+
+    @field_validator("source_data_sample_json")
+    @classmethod
+    def _check_data_sample(cls, value: Optional[str]) -> Optional[str]:
+        return sanitize_data_sample_json(value)
     
     model_config = {
         "json_schema_extra": {

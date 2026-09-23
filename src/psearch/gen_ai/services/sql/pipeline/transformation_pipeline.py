@@ -24,6 +24,17 @@ from ..enhancement.semantic_enhancer import SemanticEnhancer
 from ..validation.sql_validator import SQLValidator
 from ..fixing.sql_fixer import SQLFixer
 from ..common.schema_utils import SchemaLoader
+from ..common.input_validation import (
+    InputValidationError,
+    UnsafeSQLError,
+    enforce_sql_contract,
+    sanitize_data_sample_json,
+    split_table_id,
+    validate_critical_fields,
+    validate_destination_schema,
+    validate_source_schema_fields,
+    validate_table_id,
+)
 from ....tasks import task_manager # Import the new task manager
 
 logger = logging.getLogger(__name__)
@@ -95,6 +106,25 @@ class TransformationPipeline:
             task_manager.update_task_status(task_id, status="failed", error=msg)
             return
 
+        # Validate all caller-controlled input before it reaches an LLM prompt or
+        # a BigQuery job. The API layer validates too; this keeps the pipeline
+        # safe for any other caller (tests, scripts, future queue consumers).
+        try:
+            source_table_name = validate_table_id(source_table_name, "source_table")
+            destination_table_name = validate_table_id(destination_table_name, "destination_table")
+            source_schema_fields = validate_source_schema_fields(source_schema_fields)
+            current_destination_schema = validate_destination_schema(current_destination_schema)
+            critical_fields_for_semantic_refinement = (
+                validate_critical_fields(critical_fields_for_semantic_refinement) or None
+            )
+            source_data_sample_json = sanitize_data_sample_json(source_data_sample_json)
+        except InputValidationError as exc:
+            msg = f"Invalid input: {exc}"
+            logger.warning("[Task %s] %s", task_id, msg)
+            task_manager.add_task_log(task_id, f"ERROR: {msg}")
+            task_manager.update_task_status(task_id, status="failed", error=msg)
+            return
+
         try:
             # --- Step 1: Initial SQL Generation ---
             task_manager.update_task_status(task_id, status="generating_initial_sql")
@@ -114,17 +144,29 @@ class TransformationPipeline:
             if not fetched_sample_json_for_enhancement:
                 task_manager.add_task_log(task_id, "Source data sample not provided by caller, attempting to fetch from BigQuery.")
                 try:
-                    # self.project_id is available from __init__
-                    bq_client = bigquery.Client(project=self.project_id) 
-                    # Ensure source_table_name is correctly formatted for BQ (e.g., `project.dataset.table`)
-                    # The source_table_name argument should already be in this format.
-                    sample_query = f"SELECT * FROM `{source_table_name}` LIMIT 3"
-                    task_manager.add_task_log(task_id, f"Fetching source data sample with query: {sample_query}")
-                    query_job = bq_client.query(sample_query)
-                    rows = [dict(row) for row in query_job.result(timeout=30)] # Timeout for safety
+                    # NOTE: the sample is fetched through the tabledata.list API
+                    # (`list_rows`) with a structured TableReference rather than a
+                    # string-built `SELECT * FROM ...`. There is no SQL text for a
+                    # hostile table name to break out of, and it is cheaper than a
+                    # query job. `source_table_name` has already been validated
+                    # against a strict identifier grammar above.
+                    bq_client = bigquery.Client(project=self.project_id)
+                    parts = split_table_id(source_table_name, default_project=self.project_id)
+                    table_ref = bigquery.TableReference(
+                        bigquery.DatasetReference(parts["project"], parts["dataset"]),
+                        parts["table"],
+                    )
+                    task_manager.add_task_log(
+                        task_id,
+                        f"Fetching up to 3 sample rows from `{source_table_name}` via the BigQuery tabledata API."
+                    )
+                    row_iterator = bq_client.list_rows(table_ref, max_results=3, timeout=30)
+                    rows = [dict(row) for row in row_iterator]
                     if rows:
-                        # Use default=str to handle non-serializable types like datetime
-                        fetched_sample_json_for_enhancement = json.dumps(rows, default=str) 
+                        # sanitize_data_sample_json caps size and strips control
+                        # characters/code fences: row *contents* are untrusted data
+                        # that is about to be embedded in an LLM prompt.
+                        fetched_sample_json_for_enhancement = sanitize_data_sample_json(rows)
                         task_manager.add_task_log(task_id, f"Successfully fetched {len(rows)} sample rows from source table.")
                         logger.info(f"[Task {task_id}] Fetched {len(rows)} sample rows for semantic enhancement.")
                     else:
@@ -168,6 +210,23 @@ class TransformationPipeline:
                 task_manager.update_task_status(task_id, status=f"validating_sql_attempt_{attempt+1}")
                 log_attempt_msg = f"Initial Validation" if attempt == 0 else f"Validation Attempt {attempt + 1}"
                 task_manager.add_task_log(task_id, f"Step 4: {log_attempt_msg}.")
+
+                # Safety gate: the semantic enhancer and the fixer both re-run the
+                # SQL through an LLM, so re-assert the contract on every candidate
+                # before it is sent to BigQuery or handed back to the caller.
+                try:
+                    enforce_sql_contract(
+                        current_sql,
+                        destination_table_name=destination_table_name,
+                        source_table_name=source_table_name,
+                    )
+                except UnsafeSQLError as exc:
+                    msg = f"Generated SQL rejected by safety check: {exc}"
+                    logger.error("[Task %s] %s", task_id, msg)
+                    task_manager.add_task_log(task_id, f"ERROR: {msg}")
+                    task_manager.update_task_status(task_id, status="failed", error=msg)
+                    return
+
                 validation_result = self.sql_validator.validate_sql_dry_run(current_sql)
                 
                 if validation_result["valid"]:
