@@ -274,10 +274,35 @@ def test_valid_sql_passes_the_contract():
         "JOIN `other-proj` . `secrets` . `creds` b ON TRUE",
         f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT a.* FROM `{SOURCE}` a "
         "JOIN`other-proj`.`secrets`.`creds` b ON TRUE",
+        # Comma cross-join with separately backticked, mixed-backticked, or unbackticked table references.
+        f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT a.* FROM `{SOURCE}` a, "
+        "`other-proj`.`secrets`.`creds` b",
+        f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT a.* FROM `{SOURCE}` a, "
+        "`other-proj`.secrets.creds b",
+        f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT a.* FROM `{SOURCE}` a, "
+        "other_proj.secrets.creds b",
+        f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT a.* FROM `{SOURCE}` a, "
+        "UNNEST(a.categories) AS c, other_proj.secrets.creds b",
+        f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT a.* FROM `{SOURCE}` a, "
+        "(SELECT * FROM other_proj.secrets.creds) b",
+        f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT a.* FROM `{SOURCE}` a, "
+        "(other_proj.secrets.creds) b",
+        f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT a.* FROM "
+        "(other_proj.secrets.creds a JOIN `{SOURCE}` b ON TRUE)",
+        f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT * FROM secrets.my_tvf(1)",
+        f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT a.* FROM (SELECT * FROM `{SOURCE}`) a, "
+        "other_proj.secrets.creds b",
         # Statement stuffing / forbidden DML.
         f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT 1; DROP TABLE `{SOURCE}`",
         f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT 1 FROM `{SOURCE}` WHERE UPDATE `{SOURCE}` SET id = 'x'",
         f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT 1 FROM `{SOURCE}` WHERE UPDATE`{SOURCE}` SET id = 'x'",
+        f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT 1 FROM `{SOURCE}` WHERE DELETE `{SOURCE}` WHERE TRUE",
+        f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT 1 FROM `{SOURCE}` WHERE DELETE (`{SOURCE}`) WHERE TRUE",
+        f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT 1 FROM `{SOURCE}` WHERE DELETE FROM (`{SOURCE}`) WHERE TRUE",
+        f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT 1 FROM `{SOURCE}` WHERE INSERT `{SOURCE}` VALUES (1)",
+        f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT 1 FROM `{SOURCE}` WHERE INSERT INTO (`{SOURCE}`) VALUES (1)",
+        f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT 1 FROM `{SOURCE}` WHERE MERGE `{SOURCE}` USING `{SOURCE}` ON TRUE",
+        f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT 1 FROM `{SOURCE}` WHERE MERGE (`{SOURCE}`) USING `{SOURCE}` ON TRUE",
         f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT 1 FROM `{SOURCE}` WHERE CALL `{SOURCE}`()",
         f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT 1 FROM `{SOURCE}` WHERE CALL`{SOURCE}`()",
         # Comment quote smuggling attempting to hide a forbidden JOIN between apostrophes.
@@ -300,6 +325,7 @@ def test_contract_is_not_fooled_by_keywords_in_comments_or_strings():
         "  'DROP TABLE everything' AS note, -- INSERT INTO nothing\n"
         "  -- Source doesn't have this column; default to 'N/A'\n"
         "  'N/A' AS fallback,\n"
+        "  source.update AS last_update,\n"
         f"  source.id AS id\nFROM `{SOURCE}` AS source"
     )
     assert enforce_sql_contract(sql, DESTINATION, SOURCE) == sql
@@ -319,7 +345,8 @@ def test_contract_allows_ctes_and_unnest():
     sql = (
         f"CREATE OR REPLACE TABLE `{DESTINATION}` AS WITH src AS (\n"
         f"  SELECT * FROM `{SOURCE}`\n"
-        ")\nSELECT s.id AS id, c AS category FROM src AS s, UNNEST(s.categories) AS c"
+        ")\nSELECT s.id AS id, EXTRACT(YEAR FROM s.created_at) AS yr, c AS category "
+        "FROM src AS s, UNNEST(s.categories) AS c"
     )
     # A leading WITH is not a CREATE header violation because the header check
     # only looks at the statement prefix.
