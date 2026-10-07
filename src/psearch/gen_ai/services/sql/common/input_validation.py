@@ -420,12 +420,10 @@ _SQL_NOISE_RE = re.compile(
     r"(?:--|#)[^\n]*",
     re.DOTALL,
 )
-_BACKTICKED_RE = re.compile(r"`([^`]*)`")
+_IDENT_SEGMENT = r"(?:`[^`]+`|[A-Za-z0-9_\-]+)"
+_BACKTICKED_RE = re.compile(rf"{_IDENT_SEGMENT}(?:\s*\.\s*{_IDENT_SEGMENT})*")
 _FROM_JOIN_RE = re.compile(
-    r"\b(?:FROM|JOIN)(?:\s+|(?=`))("
-    r"(?:`[^`]+`|[A-Za-z0-9_\-]+)"
-    r"(?:\s*\.\s*(?:`[^`]+`|[A-Za-z0-9_\-]+))*"
-    r")",
+    rf"\b(?:FROM|JOIN)(?:\s+|(?=`))({_IDENT_SEGMENT}(?:\s*\.\s*{_IDENT_SEGMENT})*)",
     re.IGNORECASE,
 )
 
@@ -437,12 +435,12 @@ _FORBIDDEN_CONSTRUCTS = [
     (re.compile(r"\bLOAD\s+DATA\b", re.IGNORECASE), "LOAD DATA"),
     (re.compile(r"\bDROP(?:\s+|(?=`))[`\w]", re.IGNORECASE), "DROP"),
     (re.compile(r"\bTRUNCATE\s+TABLE\b", re.IGNORECASE), "TRUNCATE TABLE"),
-    (re.compile(r"\bDELETE\s+FROM\b", re.IGNORECASE), "DELETE"),
-    (re.compile(r"\bINSERT\s+INTO\b", re.IGNORECASE), "INSERT"),
+    (re.compile(r"\bDELETE(?:\s+FROM)?(?:\s+|(?=`))[`\w]", re.IGNORECASE), "DELETE"),
+    (re.compile(r"\bINSERT(?:\s+INTO)?(?:\s+|(?=`))[`\w]", re.IGNORECASE), "INSERT"),
     (re.compile(r"\bUPDATE(?:\s+|(?=`))[`\w]", re.IGNORECASE), "UPDATE"),
-    (re.compile(r"\bMERGE\s+INTO\b", re.IGNORECASE), "MERGE"),
+    (re.compile(r"\bMERGE(?:\s+INTO)?(?:\s+|(?=`))[`\w]", re.IGNORECASE), "MERGE"),
     (re.compile(r"\bALTER\s+(?:TABLE|SCHEMA|VIEW|MODEL|ORGANIZATION|PROJECT)\b", re.IGNORECASE), "ALTER"),
-    (re.compile(r"\b(?:GRANT|REVOKE)\s+", re.IGNORECASE), "GRANT/REVOKE"),
+    (re.compile(r"\b(?:GRANT|REVOKE)(?:\s+|(?=`))[`\w]", re.IGNORECASE), "GRANT/REVOKE"),
     (re.compile(r"\bCALL(?:\s+|(?=`))[`\w]", re.IGNORECASE), "CALL"),
     # Any CREATE after the single expected header is unexpected.
     (re.compile(r"\bCREATE(?:\s+OR\s+REPLACE)?(?:\s+|(?=`))[`\w]", re.IGNORECASE), "additional CREATE statement"),
@@ -540,7 +538,9 @@ def enforce_sql_contract(
             )
 
     for quoted in _BACKTICKED_RE.findall(stripped):
-        candidate = quoted.strip()
+        if "`" not in quoted:
+            continue
+        candidate = re.sub(r"[\s`]+", "", quoted)
         if "." not in candidate:
             continue
         if candidate.lower() not in allowed_tables:

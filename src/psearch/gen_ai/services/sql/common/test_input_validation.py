@@ -274,10 +274,18 @@ def test_valid_sql_passes_the_contract():
         "JOIN `other-proj` . `secrets` . `creds` b ON TRUE",
         f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT a.* FROM `{SOURCE}` a "
         "JOIN`other-proj`.`secrets`.`creds` b ON TRUE",
+        # Comma cross-join with separately backticked or mixed-backticked table references.
+        f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT a.* FROM `{SOURCE}` a, "
+        "`other-proj`.`secrets`.`creds` b",
+        f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT a.* FROM `{SOURCE}` a, "
+        "`other-proj`.secrets.creds b",
         # Statement stuffing / forbidden DML.
         f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT 1; DROP TABLE `{SOURCE}`",
         f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT 1 FROM `{SOURCE}` WHERE UPDATE `{SOURCE}` SET id = 'x'",
         f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT 1 FROM `{SOURCE}` WHERE UPDATE`{SOURCE}` SET id = 'x'",
+        f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT 1 FROM `{SOURCE}` WHERE DELETE `{SOURCE}` WHERE TRUE",
+        f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT 1 FROM `{SOURCE}` WHERE INSERT `{SOURCE}` VALUES (1)",
+        f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT 1 FROM `{SOURCE}` WHERE MERGE `{SOURCE}` USING `{SOURCE}` ON TRUE",
         f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT 1 FROM `{SOURCE}` WHERE CALL `{SOURCE}`()",
         f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT 1 FROM `{SOURCE}` WHERE CALL`{SOURCE}`()",
         # Comment quote smuggling attempting to hide a forbidden JOIN between apostrophes.
