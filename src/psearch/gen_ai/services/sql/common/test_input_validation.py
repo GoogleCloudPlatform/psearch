@@ -285,6 +285,11 @@ def test_valid_sql_passes_the_contract():
         "UNNEST(a.categories) AS c, other_proj.secrets.creds b",
         f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT a.* FROM `{SOURCE}` a, "
         "(SELECT * FROM other_proj.secrets.creds) b",
+        f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT a.* FROM `{SOURCE}` a, "
+        "(other_proj.secrets.creds) b",
+        f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT a.* FROM "
+        "(other_proj.secrets.creds a JOIN `{SOURCE}` b ON TRUE)",
+        f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT * FROM secrets.my_tvf(1)",
         f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT a.* FROM (SELECT * FROM `{SOURCE}`) a, "
         "other_proj.secrets.creds b",
         # Statement stuffing / forbidden DML.
@@ -292,8 +297,12 @@ def test_valid_sql_passes_the_contract():
         f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT 1 FROM `{SOURCE}` WHERE UPDATE `{SOURCE}` SET id = 'x'",
         f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT 1 FROM `{SOURCE}` WHERE UPDATE`{SOURCE}` SET id = 'x'",
         f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT 1 FROM `{SOURCE}` WHERE DELETE `{SOURCE}` WHERE TRUE",
+        f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT 1 FROM `{SOURCE}` WHERE DELETE (`{SOURCE}`) WHERE TRUE",
+        f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT 1 FROM `{SOURCE}` WHERE DELETE FROM (`{SOURCE}`) WHERE TRUE",
         f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT 1 FROM `{SOURCE}` WHERE INSERT `{SOURCE}` VALUES (1)",
+        f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT 1 FROM `{SOURCE}` WHERE INSERT INTO (`{SOURCE}`) VALUES (1)",
         f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT 1 FROM `{SOURCE}` WHERE MERGE `{SOURCE}` USING `{SOURCE}` ON TRUE",
+        f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT 1 FROM `{SOURCE}` WHERE MERGE (`{SOURCE}`) USING `{SOURCE}` ON TRUE",
         f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT 1 FROM `{SOURCE}` WHERE CALL `{SOURCE}`()",
         f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT 1 FROM `{SOURCE}` WHERE CALL`{SOURCE}`()",
         # Comment quote smuggling attempting to hide a forbidden JOIN between apostrophes.

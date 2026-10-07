@@ -422,8 +422,14 @@ _SQL_NOISE_RE = re.compile(
 )
 _IDENT_SEGMENT = r"(?:`[^`]+`|[A-Za-z0-9_\-]+)"
 _BACKTICKED_RE = re.compile(rf"(?:{_IDENT_SEGMENT}\s*\.\s*)*`[^`]+`(?:\s*\.\s*{_IDENT_SEGMENT})*")
-_NON_SUBQUERY_PARENS_RE = re.compile(
-    r"\((?!\s*(?:SELECT|WITH)\b)[^()]*\)", re.IGNORECASE | re.DOTALL
+_FUNCTION_PARENS_RE = re.compile(
+    r"\b(EXTRACT|TRIM)\s*\((?!\s*(?:SELECT|WITH)\b)(?:(?!\bJOIN\b)[^()])*\)"
+    r"|\b(?!(?:FROM|JOIN|ON|USING|WHERE|AND|OR|AS|SELECT|WITH|TABLE|INTO|UPDATE|DELETE|INSERT|MERGE)\b)"
+    r"([A-Za-z0-9_\-]+)\s*\((?!\s*(?:SELECT|WITH)\b)(?:(?!\b(?:FROM|JOIN)\b)[^()])*\)",
+    re.IGNORECASE | re.DOTALL,
+)
+_GROUPING_PARENS_RE = re.compile(
+    r"\((?!\s*(?:SELECT|WITH)\b)([^()]*)\)", re.IGNORECASE | re.DOTALL
 )
 _FROM_JOIN_BLOCK_RE = re.compile(
     r"\b(?:FROM|JOIN)(?:\s+|(?=`))([^;()]+?)"
@@ -440,17 +446,17 @@ _FORBIDDEN_CONSTRUCTS = [
     (re.compile(r"\bEXECUTE\s+IMMEDIATE\b", re.IGNORECASE), "EXECUTE IMMEDIATE (dynamic SQL)"),
     (re.compile(r"\bEXPORT\s+DATA\b", re.IGNORECASE), "EXPORT DATA"),
     (re.compile(r"\bLOAD\s+DATA\b", re.IGNORECASE), "LOAD DATA"),
-    (re.compile(r"\bDROP(?:\s+|(?=`))[`\w]", re.IGNORECASE), "DROP"),
+    (re.compile(r"\bDROP(?:\s+|(?=[`\(]))[`\w(]", re.IGNORECASE), "DROP"),
     (re.compile(r"\bTRUNCATE\s+TABLE\b", re.IGNORECASE), "TRUNCATE TABLE"),
-    (re.compile(r"\bDELETE(?:\s+FROM)?(?:\s+|(?=`))[`\w]", re.IGNORECASE), "DELETE"),
-    (re.compile(r"\bINSERT(?:\s+INTO)?(?:\s+|(?=`))[`\w]", re.IGNORECASE), "INSERT"),
-    (re.compile(r"\bUPDATE(?:\s+|(?=`))[`\w]", re.IGNORECASE), "UPDATE"),
-    (re.compile(r"\bMERGE(?:\s+INTO)?(?:\s+|(?=`))[`\w]", re.IGNORECASE), "MERGE"),
+    (re.compile(r"\bDELETE(?:\s+FROM)?(?:\s+|(?=[`\(]))[`\w(]", re.IGNORECASE), "DELETE"),
+    (re.compile(r"\bINSERT(?:\s+INTO)?(?:\s+|(?=[`\(]))[`\w(]", re.IGNORECASE), "INSERT"),
+    (re.compile(r"\bUPDATE(?:\s+|(?=[`\(]))[`\w(]", re.IGNORECASE), "UPDATE"),
+    (re.compile(r"\bMERGE(?:\s+INTO)?(?:\s+|(?=[`\(]))[`\w(]", re.IGNORECASE), "MERGE"),
     (re.compile(r"\bALTER\s+(?:TABLE|SCHEMA|VIEW|MODEL|ORGANIZATION|PROJECT)\b", re.IGNORECASE), "ALTER"),
-    (re.compile(r"\b(?:GRANT|REVOKE)(?:\s+|(?=`))[`\w]", re.IGNORECASE), "GRANT/REVOKE"),
-    (re.compile(r"\bCALL(?:\s+|(?=`))[`\w]", re.IGNORECASE), "CALL"),
+    (re.compile(r"\b(?:GRANT|REVOKE)(?:\s+|(?=[`\(]))[`\w(]", re.IGNORECASE), "GRANT/REVOKE"),
+    (re.compile(r"\bCALL(?:\s+|(?=[`\(]))[`\w(]", re.IGNORECASE), "CALL"),
     # Any CREATE after the single expected header is unexpected.
-    (re.compile(r"\bCREATE(?:\s+OR\s+REPLACE)?(?:\s+|(?=`))[`\w]", re.IGNORECASE), "additional CREATE statement"),
+    (re.compile(r"\bCREATE(?:\s+OR\s+REPLACE)?(?:\s+|(?=[`\(]))[`\w(]", re.IGNORECASE), "additional CREATE statement"),
 
     (re.compile(r"\bEXTERNAL_QUERY\s*\(", re.IGNORECASE), "EXTERNAL_QUERY"),
     (re.compile(r"\bSET\s+@@", re.IGNORECASE), "system variable assignment"),
@@ -535,8 +541,13 @@ def enforce_sql_contract(
 
     collapsed = stripped
     while True:
-        while _NON_SUBQUERY_PARENS_RE.search(collapsed):
-            collapsed = _NON_SUBQUERY_PARENS_RE.sub(" ", collapsed)
+        while True:
+            collapsed, fn_count = _FUNCTION_PARENS_RE.subn(
+                lambda m: m.group(1) or m.group(2), collapsed
+            )
+            collapsed, grp_count = _GROUPING_PARENS_RE.subn(r" \1 ", collapsed)
+            if fn_count == 0 and grp_count == 0:
+                break
 
         for block in _FROM_JOIN_BLOCK_RE.findall(collapsed):
             for part in block.split(","):
