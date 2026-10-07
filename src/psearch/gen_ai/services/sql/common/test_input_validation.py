@@ -274,11 +274,19 @@ def test_valid_sql_passes_the_contract():
         "JOIN `other-proj` . `secrets` . `creds` b ON TRUE",
         f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT a.* FROM `{SOURCE}` a "
         "JOIN`other-proj`.`secrets`.`creds` b ON TRUE",
-        # Comma cross-join with separately backticked or mixed-backticked table references.
+        # Comma cross-join with separately backticked, mixed-backticked, or unbackticked table references.
         f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT a.* FROM `{SOURCE}` a, "
         "`other-proj`.`secrets`.`creds` b",
         f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT a.* FROM `{SOURCE}` a, "
         "`other-proj`.secrets.creds b",
+        f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT a.* FROM `{SOURCE}` a, "
+        "other_proj.secrets.creds b",
+        f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT a.* FROM `{SOURCE}` a, "
+        "UNNEST(a.categories) AS c, other_proj.secrets.creds b",
+        f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT a.* FROM `{SOURCE}` a, "
+        "(SELECT * FROM other_proj.secrets.creds) b",
+        f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT a.* FROM (SELECT * FROM `{SOURCE}`) a, "
+        "other_proj.secrets.creds b",
         # Statement stuffing / forbidden DML.
         f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT 1; DROP TABLE `{SOURCE}`",
         f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT 1 FROM `{SOURCE}` WHERE UPDATE `{SOURCE}` SET id = 'x'",
@@ -327,7 +335,8 @@ def test_contract_allows_ctes_and_unnest():
     sql = (
         f"CREATE OR REPLACE TABLE `{DESTINATION}` AS WITH src AS (\n"
         f"  SELECT * FROM `{SOURCE}`\n"
-        ")\nSELECT s.id AS id, c AS category FROM src AS s, UNNEST(s.categories) AS c"
+        ")\nSELECT s.id AS id, EXTRACT(YEAR FROM s.created_at) AS yr, c AS category "
+        "FROM src AS s, UNNEST(s.categories) AS c"
     )
     # A leading WITH is not a CREATE header violation because the header check
     # only looks at the statement prefix.

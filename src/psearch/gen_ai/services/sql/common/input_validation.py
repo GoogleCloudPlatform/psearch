@@ -422,9 +422,16 @@ _SQL_NOISE_RE = re.compile(
 )
 _IDENT_SEGMENT = r"(?:`[^`]+`|[A-Za-z0-9_\-]+)"
 _BACKTICKED_RE = re.compile(rf"{_IDENT_SEGMENT}(?:\s*\.\s*{_IDENT_SEGMENT})*")
-_FROM_JOIN_RE = re.compile(
-    rf"\b(?:FROM|JOIN)(?:\s+|(?=`))({_IDENT_SEGMENT}(?:\s*\.\s*{_IDENT_SEGMENT})*)",
-    re.IGNORECASE,
+_NON_SUBQUERY_PARENS_RE = re.compile(
+    r"\((?!\s*(?:SELECT|WITH)\b)[^()]*\)", re.IGNORECASE | re.DOTALL
+)
+_FROM_JOIN_BLOCK_RE = re.compile(
+    r"\b(?:FROM|JOIN)(?:\s+|(?=`))([^;()]+?)"
+    r"(?=\b(?:WHERE|GROUP|ORDER|LIMIT|OFFSET|HAVING|WINDOW|QUALIFY|UNION|EXCEPT|INTERSECT|ON|USING|LEFT|RIGHT|INNER|CROSS|OUTER|FULL|JOIN|SELECT|FROM)\b|;|[()]|$)",
+    re.IGNORECASE | re.DOTALL,
+)
+_TABLE_REF_PREFIX_RE = re.compile(
+    rf"^({_IDENT_SEGMENT}(?:\s*\.\s*{_IDENT_SEGMENT})*)"
 )
 
 # Statements/constructs that a schema-mapping script never needs. Matched
@@ -526,16 +533,32 @@ def enforce_sql_contract(
                 f"Generated SQL contains a disallowed construct ({label}): {match.group(0)!r}."
             )
 
-    for raw_ref in _FROM_JOIN_RE.findall(stripped):
-        ref = re.sub(r"[\s`]+", "", raw_ref)
-        if "." not in ref:
-            # A CTE name, a table alias or an UNNEST/subquery target: harmless.
-            continue
-        if ref.lower() not in allowed_tables:
-            raise UnsafeSQLError(
-                f"Generated SQL reads from unexpected table {ref!r}. Only "
-                f"{sorted(allowed_tables)} are allowed."
-            )
+    collapsed = stripped
+    while True:
+        while _NON_SUBQUERY_PARENS_RE.search(collapsed):
+            collapsed = _NON_SUBQUERY_PARENS_RE.sub(" ", collapsed)
+
+        for block in _FROM_JOIN_BLOCK_RE.findall(collapsed):
+            for part in block.split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                ref_match = _TABLE_REF_PREFIX_RE.match(part)
+                if not ref_match:
+                    continue
+                ref = re.sub(r"[\s`]+", "", ref_match.group(1))
+                if "." not in ref:
+                    # A CTE name, a table alias or an UNNEST/subquery target: harmless.
+                    continue
+                if ref.lower() not in allowed_tables:
+                    raise UnsafeSQLError(
+                        f"Generated SQL reads from unexpected table {ref!r}. Only "
+                        f"{sorted(allowed_tables)} are allowed."
+                    )
+
+        collapsed, count = re.subn(r"\([^()]*\)", " subquery ", collapsed)
+        if count == 0:
+            break
 
     for quoted in _BACKTICKED_RE.findall(stripped):
         if "`" not in quoted:
