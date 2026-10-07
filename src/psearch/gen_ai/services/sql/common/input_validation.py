@@ -292,11 +292,14 @@ def _validate_schema_fields(
 
         name = validate_column_name(field.get("name"), f"{field_path}.name")
 
-        raw_type = field.get("type") or "STRING"
-        if not isinstance(raw_type, str):
+        raw_type = field.get("type")
+        if raw_type is None:
+            field_type = "STRING"
+        elif not isinstance(raw_type, str):
             raise InputValidationError(f"{field_path}.type must be a string.")
-        # An empty string means "not specified" in the committed schema.json.
-        field_type = raw_type.strip().upper() or "STRING"
+        else:
+            # An empty string means "not specified" in the committed schema.json.
+            field_type = raw_type.strip().upper() or "STRING"
         if field_type not in ALLOWED_SCHEMA_TYPES:
             raise InputValidationError(
                 f"{field_path}.type {raw_type[:40]!r} is not a supported BigQuery type. "
@@ -408,13 +411,23 @@ def sanitize_data_sample_json(value: Any) -> Optional[str]:
 
 # --- Output contract enforcement -------------------------------------------
 
-_LINE_COMMENT_RE = re.compile(r"(--|#)[^\n]*")
-_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
-_STRING_LITERAL_RE = re.compile(
-    r"'''.*?'''|\"\"\".*?\"\"\"|'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"", re.DOTALL
+_SQL_NOISE_RE = re.compile(
+    r"'''.*?'''|"
+    r'""".*?"""|'
+    r"'(?:\\.|[^'\\])*'|"
+    r'"(?:\\.|[^"\\])*"|'
+    r"/\*.*?\*/|"
+    r"(?:--|#)[^\n]*",
+    re.DOTALL,
 )
 _BACKTICKED_RE = re.compile(r"`([^`]*)`")
-_FROM_JOIN_RE = re.compile(r"\b(?:FROM|JOIN)\s+(`[^`]+`|[A-Za-z0-9_.\-]+)", re.IGNORECASE)
+_FROM_JOIN_RE = re.compile(
+    r"\b(?:FROM|JOIN)\s+("
+    r"(?:`[^`]+`|[A-Za-z0-9_\-]+)"
+    r"(?:\s*\.\s*(?:`[^`]+`|[A-Za-z0-9_\-]+))*"
+    r")",
+    re.IGNORECASE,
+)
 
 # Statements/constructs that a schema-mapping script never needs. Matched
 # against SQL with comments and string literals removed.
@@ -426,6 +439,7 @@ _FORBIDDEN_CONSTRUCTS = [
     (re.compile(r"\bTRUNCATE\s+TABLE\b", re.IGNORECASE), "TRUNCATE TABLE"),
     (re.compile(r"\bDELETE\s+FROM\b", re.IGNORECASE), "DELETE"),
     (re.compile(r"\bINSERT\s+INTO\b", re.IGNORECASE), "INSERT"),
+    (re.compile(r"\bUPDATE\s+[`\w]", re.IGNORECASE), "UPDATE"),
     (re.compile(r"\bMERGE\s+INTO\b", re.IGNORECASE), "MERGE"),
     (re.compile(r"\bALTER\s+(?:TABLE|SCHEMA|VIEW|MODEL|ORGANIZATION|PROJECT)\b", re.IGNORECASE), "ALTER"),
     (re.compile(r"\b(?:GRANT|REVOKE)\s+", re.IGNORECASE), "GRANT/REVOKE"),
@@ -441,9 +455,13 @@ _FORBIDDEN_CONSTRUCTS = [
 
 def _strip_sql_noise(sql: str) -> str:
     """Remove comments and string literals so keyword scanning cannot be fooled."""
-    without_strings = _STRING_LITERAL_RE.sub("''", sql)
-    without_block_comments = _BLOCK_COMMENT_RE.sub(" ", without_strings)
-    return _LINE_COMMENT_RE.sub(" ", without_block_comments)
+    def _replace(match: re.Match[str]) -> str:
+        text = match.group(0)
+        if text.startswith(("--", "#", "/*")):
+            return " "
+        return "''"
+
+    return _SQL_NOISE_RE.sub(_replace, sql)
 
 
 def enforce_sql_contract(
@@ -511,7 +529,7 @@ def enforce_sql_contract(
             )
 
     for raw_ref in _FROM_JOIN_RE.findall(stripped):
-        ref = raw_ref.strip("`")
+        ref = re.sub(r"[\s`]+", "", raw_ref)
         if "." not in ref:
             # A CTE name, a table alias or an UNNEST/subquery target: harmless.
             continue
