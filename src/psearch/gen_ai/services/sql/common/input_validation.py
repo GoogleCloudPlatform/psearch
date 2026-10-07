@@ -421,7 +421,7 @@ _SQL_NOISE_RE = re.compile(
     re.DOTALL,
 )
 _IDENT_SEGMENT = r"(?:`[^`]+`|[A-Za-z0-9_\-]+)"
-_BACKTICKED_RE = re.compile(rf"{_IDENT_SEGMENT}(?:\s*\.\s*{_IDENT_SEGMENT})*")
+_BACKTICKED_RE = re.compile(rf"(?:{_IDENT_SEGMENT}\s*\.\s*)*`[^`]+`(?:\s*\.\s*{_IDENT_SEGMENT})*")
 _NON_SUBQUERY_PARENS_RE = re.compile(
     r"\((?!\s*(?:SELECT|WITH)\b)[^()]*\)", re.IGNORECASE | re.DOTALL
 )
@@ -561,8 +561,6 @@ def enforce_sql_contract(
             break
 
     for quoted in _BACKTICKED_RE.findall(stripped):
-        if "`" not in quoted:
-            continue
         candidate = re.sub(r"[\s`]+", "", quoted)
         if "." not in candidate:
             continue
