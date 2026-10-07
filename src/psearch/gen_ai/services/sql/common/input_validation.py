@@ -422,7 +422,7 @@ _SQL_NOISE_RE = re.compile(
 )
 _BACKTICKED_RE = re.compile(r"`([^`]*)`")
 _FROM_JOIN_RE = re.compile(
-    r"\b(?:FROM|JOIN)\s+("
+    r"\b(?:FROM|JOIN)(?:\s+|(?=`))("
     r"(?:`[^`]+`|[A-Za-z0-9_\-]+)"
     r"(?:\s*\.\s*(?:`[^`]+`|[A-Za-z0-9_\-]+))*"
     r")",
@@ -435,17 +435,17 @@ _FORBIDDEN_CONSTRUCTS = [
     (re.compile(r"\bEXECUTE\s+IMMEDIATE\b", re.IGNORECASE), "EXECUTE IMMEDIATE (dynamic SQL)"),
     (re.compile(r"\bEXPORT\s+DATA\b", re.IGNORECASE), "EXPORT DATA"),
     (re.compile(r"\bLOAD\s+DATA\b", re.IGNORECASE), "LOAD DATA"),
-    (re.compile(r"\bDROP\s+\w", re.IGNORECASE), "DROP"),
+    (re.compile(r"\bDROP(?:\s+|(?=`))[`\w]", re.IGNORECASE), "DROP"),
     (re.compile(r"\bTRUNCATE\s+TABLE\b", re.IGNORECASE), "TRUNCATE TABLE"),
     (re.compile(r"\bDELETE\s+FROM\b", re.IGNORECASE), "DELETE"),
     (re.compile(r"\bINSERT\s+INTO\b", re.IGNORECASE), "INSERT"),
-    (re.compile(r"\bUPDATE\s+[`\w]", re.IGNORECASE), "UPDATE"),
+    (re.compile(r"\bUPDATE(?:\s+|(?=`))[`\w]", re.IGNORECASE), "UPDATE"),
     (re.compile(r"\bMERGE\s+INTO\b", re.IGNORECASE), "MERGE"),
     (re.compile(r"\bALTER\s+(?:TABLE|SCHEMA|VIEW|MODEL|ORGANIZATION|PROJECT)\b", re.IGNORECASE), "ALTER"),
     (re.compile(r"\b(?:GRANT|REVOKE)\s+", re.IGNORECASE), "GRANT/REVOKE"),
-    (re.compile(r"\bCALL\s+\w", re.IGNORECASE), "CALL"),
+    (re.compile(r"\bCALL(?:\s+|(?=`))[`\w]", re.IGNORECASE), "CALL"),
     # Any CREATE after the single expected header is unexpected.
-    (re.compile(r"\bCREATE\s+(?:OR\s+REPLACE\s+)?\w", re.IGNORECASE), "additional CREATE statement"),
+    (re.compile(r"\bCREATE(?:\s+OR\s+REPLACE)?(?:\s+|(?=`))[`\w]", re.IGNORECASE), "additional CREATE statement"),
 
     (re.compile(r"\bEXTERNAL_QUERY\s*\(", re.IGNORECASE), "EXTERNAL_QUERY"),
     (re.compile(r"\bSET\s+@@", re.IGNORECASE), "system variable assignment"),
