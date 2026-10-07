@@ -325,6 +325,7 @@ def test_contract_is_not_fooled_by_keywords_in_comments_or_strings():
         "  'DROP TABLE everything' AS note, -- INSERT INTO nothing\n"
         "  -- Source doesn't have this column; default to 'N/A'\n"
         "  'N/A' AS fallback,\n"
+        "  source.update AS last_update,\n"
         f"  source.id AS id\nFROM `{SOURCE}` AS source"
     )
     assert enforce_sql_contract(sql, DESTINATION, SOURCE) == sql
