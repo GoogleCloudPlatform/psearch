@@ -178,6 +178,13 @@ def test_destination_schema_strips_injected_keys_and_prose():
         validate_destination_schema({"fields": [{"name": POC_PAYLOAD, "type": "STRING"}]})
 
 
+@pytest.mark.parametrize("bad_type", [[], {}, 0, False])
+def test_destination_schema_rejects_falsy_non_string_types(bad_type):
+    with pytest.raises(InputValidationError):
+        validate_destination_schema({"fields": [{"name": "id", "type": bad_type}]})
+
+
+
 def test_destination_schema_description_is_defanged():
     validated = validate_destination_schema(
         {
@@ -260,10 +267,22 @@ def test_valid_sql_passes_the_contract():
         f"CREATE OR REPLACE TABLE `attacker-proj.pub.leak` AS SELECT * FROM `{SOURCE}`",
         # Reading a table the caller never declared.
         f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT * FROM `secrets.credentials`",
+        f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT * FROM `other-proj`.`secrets`.`creds`",
         f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT a.* FROM `{SOURCE}` a "
         "JOIN `other-proj.secrets.creds` b ON TRUE",
-        # Statement stuffing.
+        f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT a.* FROM `{SOURCE}` a "
+        "JOIN `other-proj` . `secrets` . `creds` b ON TRUE",
+        f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT a.* FROM `{SOURCE}` a "
+        "JOIN`other-proj`.`secrets`.`creds` b ON TRUE",
+        # Statement stuffing / forbidden DML.
         f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT 1; DROP TABLE `{SOURCE}`",
+        f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT 1 FROM `{SOURCE}` WHERE UPDATE `{SOURCE}` SET id = 'x'",
+        f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT 1 FROM `{SOURCE}` WHERE UPDATE`{SOURCE}` SET id = 'x'",
+        f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT 1 FROM `{SOURCE}` WHERE CALL `{SOURCE}`()",
+        f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT 1 FROM `{SOURCE}` WHERE CALL`{SOURCE}`()",
+        # Comment quote smuggling attempting to hide a forbidden JOIN between apostrophes.
+        f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT a.* FROM `{SOURCE}` a -- don't\n"
+        "JOIN `other-proj.secrets.creds` b ON TRUE -- it's\n",
         # Dynamic SQL / data movement.
         f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT 1 FROM `{SOURCE}` "
         "UNION ALL SELECT 1 FROM EXTERNAL_QUERY('x', 'select 1')",
@@ -279,9 +298,21 @@ def test_contract_is_not_fooled_by_keywords_in_comments_or_strings():
     sql = (
         f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT\n"
         "  'DROP TABLE everything' AS note, -- INSERT INTO nothing\n"
+        "  -- Source doesn't have this column; default to 'N/A'\n"
+        "  'N/A' AS fallback,\n"
         f"  source.id AS id\nFROM `{SOURCE}` AS source"
     )
     assert enforce_sql_contract(sql, DESTINATION, SOURCE) == sql
+
+
+def test_contract_allows_multipart_backticked_allowed_source_table():
+    sql = (
+        f"CREATE OR REPLACE TABLE `{DESTINATION}` AS SELECT\n"
+        "  source.id AS id\n"
+        "FROM `psearch-dev-ze`.`raw_data`.`product_catalog` AS source"
+    )
+    assert enforce_sql_contract(sql, DESTINATION, SOURCE) == sql
+
 
 
 def test_contract_allows_ctes_and_unnest():
