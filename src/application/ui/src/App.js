@@ -32,6 +32,7 @@ import {
     InputLabel,
     Select,
     MenuItem,
+    Alert,
     ThemeProvider,
     createTheme,
 } from '@mui/material';
@@ -65,6 +66,8 @@ function ProductSearch({
     const [alpha, setAlpha] = useState(0.5);
     const [channel, setChannel] = useState('');
     const [onlyInStock, setOnlyInStock] = useState(false);
+    const [cep, setCep] = useState('');
+    const [maxSla24h, setMaxSla24h] = useState(false);
     const [internalTenantId, setInternalTenantId] = useState('default');
     const [internalLocale, setInternalLocale] = useState('');
     const tenantId = propTenantId !== undefined ? propTenantId : internalTenantId;
@@ -75,6 +78,8 @@ function ProductSearch({
     const [retrievalMode, setRetrievalMode] = useState(null);
     const [effectiveTenantId, setEffectiveTenantId] = useState(null);
     const [effectiveLocale, setEffectiveLocale] = useState(null);
+    const [expandedTerms, setExpandedTerms] = useState([]);
+    const [appliedRules, setAppliedRules] = useState([]);
     const [serverFacets, setServerFacets] = useState(null);
     const [facetsLatencyMs, setFacetsLatencyMs] = useState(null);
     // State for the filters component - now a dynamic object
@@ -496,6 +501,12 @@ function ProductSearch({
             if (selectedBrand) {
                 payload.brand = selectedBrand;
             }
+            if (cep && cep.trim()) {
+                payload.cep = cep.trim();
+            }
+            if (maxSla24h) {
+                payload.max_sla_hours = 24;
+            }
 
             const response = await axios.post(`${API_URL}/search`, payload);
 
@@ -513,6 +524,16 @@ function ProductSearch({
                 }
                 if (response.data.locale !== undefined) {
                     setEffectiveLocale(response.data.locale);
+                }
+                if (response.data.expanded_terms && Array.isArray(response.data.expanded_terms)) {
+                    setExpandedTerms(response.data.expanded_terms);
+                } else {
+                    setExpandedTerms([]);
+                }
+                if (response.data.applied_rules && Array.isArray(response.data.applied_rules)) {
+                    setAppliedRules(response.data.applied_rules);
+                } else {
+                    setAppliedRules([]);
                 }
                 if (response.data.facets && Object.keys(response.data.facets).length > 0) {
                     setServerFacets(response.data.facets);
@@ -558,12 +579,15 @@ function ProductSearch({
             // Show AI filter suggestions if we have products and a search query
             setShowAIFilterSuggestions(processedResults.length > 0 && activeSearchQuery.trim() !== '');
         } catch (error) {
-            setError(error);
+            const serverErrMsg = error.response?.data?.error || error.response?.data?.message;
+            const displayError = serverErrMsg || error.message || 'An error occurred while searching';
+            setError(displayError);
+            setProducts([]);
             console.error("Search error:", error);
         } finally {
             setLoading(false);
         }
-    }, [activeSearchQuery, alpha, channel, onlyInStock, selectedCategory, selectedBrand, tenantId, locale]);
+    }, [activeSearchQuery, alpha, channel, onlyInStock, selectedCategory, selectedBrand, tenantId, locale, cep, maxSla24h]);
 
     // Handler for filter changes from the Filters component - now works with dynamic filter IDs
     const handleFilterChange = useCallback((filterId, value, isChecked) => {
@@ -691,6 +715,8 @@ function ProductSearch({
         setSelectedFilters({});
         setServerFacets(null);
         setFacetsLatencyMs(null);
+        setExpandedTerms([]);
+        setAppliedRules([]);
         if (options.alpha !== undefined) {
             setAlpha(options.alpha);
         }
@@ -705,6 +731,12 @@ function ProductSearch({
         }
         if (options.locale !== undefined) {
             setLocale(options.locale);
+        }
+        if (options.cep !== undefined) {
+            setCep(options.cep);
+        }
+        if (options.maxSla24h !== undefined) {
+            setMaxSla24h(options.maxSla24h);
         }
         // Update active search query which triggers API call
         setActiveSearchQuery(typeof searchText === 'string' ? searchText : searchText?.query || '');
@@ -722,6 +754,8 @@ function ProductSearch({
             // Clear any references to large data structures
             setProducts([]);
             setFilterConfigs([]);
+            setExpandedTerms([]);
+            setAppliedRules([]);
         };
     }, [fetchProducts, activeSearchQuery]);
 
@@ -882,6 +916,7 @@ function ProductSearch({
                                                     : 'IN_STOCK')
                                                 : 'OUT_OF_STOCK';
                                             const prodLocale = product.locale || product.Locale;
+                                            const dp = product.deliveryPromise;
                                             return (
                                                 <Box sx={{ display: 'flex', gap: 0.5, alignItems: 'center', flexWrap: 'wrap', mt: 1 }}>
                                                     <Chip
@@ -895,6 +930,23 @@ function ProductSearch({
                                                             size="small"
                                                             variant="outlined"
                                                             color="info"
+                                                            sx={{ fontWeight: 600, height: 24, fontSize: '0.75rem' }}
+                                                        />
+                                                    )}
+                                                    {dp && dp.label && (
+                                                        <Chip
+                                                            label={dp.label}
+                                                            size="small"
+                                                            color="success"
+                                                            sx={{ fontWeight: 600, height: 24, fontSize: '0.75rem' }}
+                                                        />
+                                                    )}
+                                                    {dp && dp.free_shipping && (
+                                                        <Chip
+                                                            label="Frete grátis"
+                                                            size="small"
+                                                            variant="outlined"
+                                                            color="success"
                                                             sx={{ fontWeight: 600, height: 24, fontSize: '0.75rem' }}
                                                         />
                                                     )}
@@ -1005,6 +1057,10 @@ function ProductSearch({
                         setTenantId={setTenantId}
                         locale={locale}
                         setLocale={setLocale}
+                        cep={cep}
+                        setCep={setCep}
+                        maxSla24h={maxSla24h}
+                        setMaxSla24h={setMaxSla24h}
                     />
 
                     {/* Display search result count and search metadata */}
@@ -1031,6 +1087,7 @@ function ProductSearch({
                                 {effectiveTenantId && ` • tenant: ${effectiveTenantId}`}
                                 {effectiveLocale && ` • locale: ${effectiveLocale}`}
                                 {facetsLatencyMs !== null && ` • facets: ${Number(facetsLatencyMs).toFixed(1)}ms`}
+                                {appliedRules && appliedRules.length > 0 && ` • applied_rules: ${appliedRules.join(', ')}`}
                             </Typography>
                             <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap' }}>
                                 {effectiveAlpha !== null && (
@@ -1048,11 +1105,34 @@ function ProductSearch({
                                 {facetsLatencyMs !== null && (
                                     <Chip size="small" variant="outlined" label={`facets: ${Number(facetsLatencyMs).toFixed(1)}ms`} />
                                 )}
+                                {appliedRules && appliedRules.length > 0 && (
+                                    <Chip size="small" color="secondary" variant="outlined" label={`applied_rules: ${appliedRules.join(', ')}`} />
+                                )}
                             </Box>
                         </Box>
 
+                        {expandedTerms && expandedTerms.length > 0 && (
+                            <Box sx={{ mb: 1.5, display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
+                                <Typography variant="body2" color="text.secondary" sx={{ fontStyle: 'italic' }}>
+                                    Also matching: {expandedTerms.join(', ')}
+                                </Typography>
+                            </Box>
+                        )}
+
+                        {appliedRules && appliedRules.length > 0 && (
+                            <Box sx={{ mb: 1.5, display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
+                                <Typography variant="body2" color="text.secondary">
+                                    Applied rules: {appliedRules.join(', ')}
+                                </Typography>
+                            </Box>
+                        )}
+
                         {loading && <Typography>Loading products...</Typography>}
-                        {error && <Typography color="error">Error: {error.message}</Typography>}
+                        {error && (
+                            <Alert severity="error" sx={{ mb: 2 }}>
+                                {typeof error === 'string' ? error : (error.message || 'An error occurred')}
+                            </Alert>
+                        )}
 
                         {/* Use memoized product grid component with stable click handler */}
                         <ProductGrid

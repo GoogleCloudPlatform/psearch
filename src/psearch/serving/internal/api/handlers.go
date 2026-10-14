@@ -20,6 +20,8 @@ type Controller struct {
 	spannerSvc   *services.SpannerService
 	embeddingSvc *services.EmbeddingService
 	cache        *services.EmbeddingCache // nil when the embedding service is unavailable
+	synonyms     *services.SynonymService
+	rules        *services.RuleService
 }
 
 func NewController(cfg *config.Config) (*Controller, error) {
@@ -46,11 +48,25 @@ func NewController(cfg *config.Config) (*Controller, error) {
 		cache = services.NewEmbeddingCache(embeddingSvc, store, embeddingSvc.Model(), cfg.GeminiEmbeddingDimension, 1000)
 		spannerSvc.SetQueryEmbedder(cache)
 	}
+	var synStore services.SynonymStore = services.NewMemorySynonymStore()
+	if client := spannerSvc.Client(); client != nil {
+		synStore = services.SpannerSynonymStore{Client: client}
+	}
+	synonyms := services.NewSynonymService(synStore, time.Minute)
+	spannerSvc.SetSynonyms(synonyms)
+	var ruleStore services.RuleStore = services.NewMemoryRuleStore()
+	if client := spannerSvc.Client(); client != nil {
+		ruleStore = services.SpannerRuleStore{Client: client}
+	}
+	rules := services.NewRuleService(ruleStore, 30*time.Second)
+	spannerSvc.SetRules(rules)
 	return &Controller{
 		config:       cfg,
 		spannerSvc:   spannerSvc,
 		embeddingSvc: embeddingSvc,
 		cache:        cache,
+		synonyms:     synonyms,
+		rules:        rules,
 	}, nil
 }
 
@@ -102,6 +118,11 @@ func (c *Controller) Search(ctx *gin.Context) {
 		req.Brand = ctx.Query("brand")
 		req.Locale = ctx.Query("locale")
 		req.TenantID = ctx.Query("tenant_id")
+		if v := ctx.Query("max_sla_hours"); v != "" {
+			if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+				req.MaxSLAHours = n
+			}
+		}
 		req.Channel = ctx.Query("channel")
 		req.CEP = ctx.Query("cep")
 		if v := ctx.Query("only_in_stock"); v == "true" || v == "1" {
@@ -132,7 +153,18 @@ func (c *Controller) Search(ctx *gin.Context) {
 		alpha = 1
 	}
 
+	zip5, cepErr := services.NormalizeCEP(req.CEP)
+	if cepErr != nil {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": cepErr.Error()})
+		return
+	}
+	if req.MaxSLAHours < 0 || req.MaxSLAHours > 24*60 {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "max_sla_hours must be between 0 and 1440"})
+		return
+	}
 	filters := models.SearchFilters{
+		Zip5:        zip5,
+		MaxSLAHours: req.MaxSLAHours,
 		OnlyInStock: req.OnlyInStock,
 		Channel:     strings.ToLower(strings.TrimSpace(req.Channel)),
 		Category:    req.Category,
@@ -174,6 +206,22 @@ func (c *Controller) Search(ctx *gin.Context) {
 	if len(results) > limit {
 		results = results[:limit]
 	}
+	if zip5 != "" && len(results) > 0 {
+		pageIDs := make([]string, 0, len(results))
+		for _, r := range results {
+			pageIDs = append(pageIDs, r.ID)
+		}
+		if promises, err := c.spannerSvc.DeliveryPromises(ctx.Request.Context(), pageIDs, zip5, req.MaxSLAHours); err != nil {
+			log.Printf("WARN: delivery promises unavailable: %v", err)
+		} else {
+			for i := range results {
+				if p, ok := promises[results[i].ID]; ok {
+					p.CEP = req.CEP
+					results[i].DeliveryPromise = p
+				}
+			}
+		}
+	}
 	tenant := strings.TrimSpace(req.TenantID)
 	if tenant == "" {
 		tenant = "default"
@@ -193,6 +241,8 @@ func (c *Controller) Search(ctx *gin.Context) {
 		BackendMode:      c.spannerSvc.BackendMode(),
 		EmbeddingVersion: c.config.ActiveVersion(),
 		CacheHit:         outcome.CacheHit,
+		ExpandedTerms:    outcome.ExpandedTerms,
+		AppliedRules:     outcome.AppliedRules,
 		RetrievalMode:    outcome.RetrievalMode,
 	})
 }
@@ -220,9 +270,7 @@ func (c *Controller) GetEmbeddingVersion(ctx *gin.Context) {
 // Requires X-Admin-Token == ADMIN_TOKEN; disabled (403) when ADMIN_TOKEN is unset.
 // The switch is per Cloud Run instance; set ACTIVE_EMBEDDING_VERSION for a fleet-wide change.
 func (c *Controller) SetEmbeddingVersion(ctx *gin.Context) {
-	token := ctx.GetHeader("X-Admin-Token")
-	if c.config.AdminToken == "" || subtle.ConstantTimeCompare([]byte(token), []byte(c.config.AdminToken)) != 1 {
-		ctx.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+	if !c.authorizeAdmin(ctx) {
 		return
 	}
 	var body struct {
@@ -238,4 +286,114 @@ func (c *Controller) SetEmbeddingVersion(ctx *gin.Context) {
 	}
 	log.Printf("config: active embedding version switched to %s (this instance)", body.Version)
 	c.GetEmbeddingVersion(ctx)
+}
+
+// authorizeAdmin enforces X-Admin-Token == ADMIN_TOKEN (constant-time); writes 403 otherwise.
+// Admin writes are disabled entirely when ADMIN_TOKEN is unset.
+func (c *Controller) authorizeAdmin(ctx *gin.Context) bool {
+	token := ctx.GetHeader("X-Admin-Token")
+	if c.config.AdminToken == "" || subtle.ConstantTimeCompare([]byte(token), []byte(c.config.AdminToken)) != 1 {
+		ctx.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+		return false
+	}
+	return true
+}
+
+// ListSynonyms: GET /api/synonyms?tenant_id=default&locale=pt-BR.
+func (c *Controller) ListSynonyms(ctx *gin.Context) {
+	tenant := strings.TrimSpace(ctx.Query("tenant_id"))
+	if tenant == "" {
+		tenant = "default"
+	}
+	rows, err := c.synonyms.List(ctx.Request.Context(), tenant, strings.TrimSpace(ctx.Query("locale")))
+	if err != nil {
+		log.Printf("WARN: list synonyms: %v", err)
+		ctx.JSON(http.StatusServiceUnavailable, gin.H{"error": "synonyms unavailable"})
+		return
+	}
+	ctx.JSON(http.StatusOK, gin.H{"tenant_id": tenant, "synonyms": rows, "count": len(rows)})
+}
+
+// UpsertSynonym: POST /api/synonyms {tenant_id, locale, term, synonyms[], weight} (admin only).
+func (c *Controller) UpsertSynonym(ctx *gin.Context) {
+	if !c.authorizeAdmin(ctx) {
+		return
+	}
+	var body services.Synonym
+	if err := ctx.ShouldBindJSON(&body); err != nil {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	saved, err := c.synonyms.Upsert(ctx.Request.Context(), body)
+	if err != nil {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	ctx.JSON(http.StatusOK, saved)
+}
+
+func tenantParam(ctx *gin.Context) string {
+	if t := strings.TrimSpace(ctx.Query("tenant_id")); t != "" {
+		return t
+	}
+	return "default"
+}
+
+// ListRules: GET /api/rules?tenant_id=default. Public read.
+func (c *Controller) ListRules(ctx *gin.Context) {
+	tenant := tenantParam(ctx)
+	rules, err := c.rules.List(ctx.Request.Context(), tenant)
+	if err != nil {
+		log.Printf("WARN: list rules: %v", err)
+		ctx.JSON(http.StatusServiceUnavailable, gin.H{"error": "rules unavailable"})
+		return
+	}
+	ctx.JSON(http.StatusOK, gin.H{"tenant_id": tenant, "rules": rules, "count": len(rules)})
+}
+
+// CreateRule: POST /api/rules (admin). PUT /api/rules/:id (admin) replaces a rule.
+func (c *Controller) CreateRule(ctx *gin.Context) { c.saveRule(ctx, "") }
+
+func (c *Controller) UpdateRule(ctx *gin.Context) { c.saveRule(ctx, ctx.Param("id")) }
+
+func (c *Controller) saveRule(ctx *gin.Context, id string) {
+	if !c.authorizeAdmin(ctx) {
+		return
+	}
+	var r services.Rule
+	if err := ctx.ShouldBindJSON(&r); err != nil {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if id != "" {
+		r.RuleID = id
+	} else {
+		r.RuleID = "" // server-assigned on create
+	}
+	if r.TenantID == "" {
+		r.TenantID = tenantParam(ctx)
+	}
+	saved, err := c.rules.Save(ctx.Request.Context(), r)
+	if err != nil {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	status := http.StatusOK
+	if id == "" {
+		status = http.StatusCreated
+	}
+	ctx.JSON(status, saved)
+}
+
+// DeleteRule: DELETE /api/rules/:id?tenant_id=default (admin).
+func (c *Controller) DeleteRule(ctx *gin.Context) {
+	if !c.authorizeAdmin(ctx) {
+		return
+	}
+	if err := c.rules.Delete(ctx.Request.Context(), tenantParam(ctx), ctx.Param("id")); err != nil {
+		log.Printf("WARN: delete rule: %v", err)
+		ctx.JSON(http.StatusServiceUnavailable, gin.H{"error": "delete failed"})
+		return
+	}
+	ctx.Status(http.StatusNoContent)
 }
