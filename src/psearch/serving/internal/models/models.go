@@ -1,18 +1,24 @@
 package models
 
 type SearchRequest struct {
-	Query        string   `json:"query" form:"q"`
-	Limit        *int     `json:"limit,omitempty" form:"limit"`
-	MinScore     *float64 `json:"min_score,omitempty" form:"min_score"`
-	Alpha        *float64 `json:"alpha,omitempty" form:"alpha"`
-	Category     string   `json:"category,omitempty" form:"category"`
-	Brand        string   `json:"brand,omitempty" form:"brand"`
-	OnlyInStock  bool     `json:"only_in_stock,omitempty" form:"only_in_stock"`
-	Channel      string   `json:"channel,omitempty" form:"channel"`
-	TenantID     string   `json:"tenant_id,omitempty" form:"tenant_id"`
-	Locale       string   `json:"locale,omitempty" form:"locale"`
-	CEP          string   `json:"cep,omitempty" form:"cep"`
-	LTR          bool     `json:"ltr,omitempty" form:"ltr"`
+	Query       string   `json:"query" form:"q"`
+	Limit       *int     `json:"limit,omitempty" form:"limit"`
+	MinScore    *float64 `json:"min_score,omitempty" form:"min_score"`
+	Alpha       *float64 `json:"alpha,omitempty" form:"alpha"`
+	Category    string   `json:"category,omitempty" form:"category"`
+	Brand       string   `json:"brand,omitempty" form:"brand"`
+	OnlyInStock bool     `json:"only_in_stock,omitempty" form:"only_in_stock"`
+	Channel     string   `json:"channel,omitempty" form:"channel"`
+	TenantID    string   `json:"tenant_id,omitempty" form:"tenant_id"`
+	Locale      string   `json:"locale,omitempty" form:"locale"`
+	CEP         string   `json:"cep,omitempty" form:"cep"`
+	LTR         bool     `json:"ltr,omitempty" form:"ltr"`
+}
+
+// SearchFilters are the catalog filters applied server-side (ADR-002, Issue #3).
+type SearchFilters struct {
+	OnlyInStock bool
+	Channel     string
 }
 
 type SearchResponse struct {
@@ -27,6 +33,7 @@ type SearchResponse struct {
 	// that actually served this query (hybrid_v1, hybrid_v2, lexical_only_degraded, memory_fallback).
 	EmbeddingVersion string `json:"embedding_version,omitempty"`
 	RetrievalMode    string `json:"retrieval_mode,omitempty"`
+	CacheHit         bool   `json:"cache_hit,omitempty"` // query embedding served from embedding_cache (Issue #2)
 }
 
 type SearchResult struct {

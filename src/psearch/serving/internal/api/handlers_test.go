@@ -1,9 +1,11 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -63,5 +65,187 @@ func TestHybridSearchAlphaParameterization(t *testing.T) {
 	}
 	if len(resp.Results) == 0 {
 		t.Fatalf("expected non-empty search results")
+	}
+}
+
+func doSearch(t *testing.T, r *gin.Engine, rawQuery string) models.SearchResponse {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/search?"+rawQuery, nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /api/search?%s status = %d, body = %s", rawQuery, w.Code, w.Body.String())
+	}
+	var resp models.SearchResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal SearchResponse: %v", err)
+	}
+	return resp
+}
+
+func ids(results []models.SearchResult) string {
+	out := make([]string, 0, len(results))
+	for _, r := range results {
+		out = append(out, r.ID)
+	}
+	return strings.Join(out, ",")
+}
+
+// Issue #1: alpha=0 (pure text) and alpha=1 (pure vector) must produce different
+// rankings; score.alpha/final_score echo the effective weight; out-of-range alpha is clamped.
+func TestAlphaExtremesChangeRankingAndAreClamped(t *testing.T) {
+	r := newTestRouter()
+	text := doSearch(t, r, "q=running+shoes&alpha=0&limit=15")
+	vec := doSearch(t, r, "q=running+shoes&alpha=1&limit=15")
+	// final_score must reflect the weights: pure-text scores ignore the vector leg and vice versa.
+	textScore := map[string]float64{}
+	for _, res := range text.Results {
+		textScore[res.ID] = res.Score["final_score"]
+		if res.Score["final_score"] != res.Score["text"] {
+			t.Fatalf("alpha=0: %s final_score %v != text %v", res.ID, res.Score["final_score"], res.Score["text"])
+		}
+	}
+	differs := false
+	for _, res := range vec.Results {
+		if res.Score["final_score"] != res.Score["vector"] {
+			t.Fatalf("alpha=1: %s final_score %v != vector %v", res.ID, res.Score["final_score"], res.Score["vector"])
+		}
+		differs = differs || textScore[res.ID] != res.Score["final_score"]
+	}
+	if !differs {
+		t.Fatal("alpha=0 and alpha=1 produced identical final_scores")
+	}
+	for _, res := range text.Results {
+		if res.Score["alpha"] != 0 {
+			t.Fatalf("alpha=0: score.alpha = %v", res.Score["alpha"])
+		}
+		if _, ok := res.Score["final_score"]; !ok {
+			t.Fatalf("result %s missing score.final_score", res.ID)
+		}
+	}
+	if text.EffectiveAlpha != 0 || vec.EffectiveAlpha != 1 {
+		t.Fatalf("effective_alpha = %v / %v, want 0 / 1", text.EffectiveAlpha, vec.EffectiveAlpha)
+	}
+	if got := doSearch(t, r, "q=running+shoes&alpha=7").EffectiveAlpha; got != 1 {
+		t.Errorf("alpha=7 effective_alpha = %v, want clamped 1", got)
+	}
+	if got := doSearch(t, r, "q=running+shoes&alpha=-3").EffectiveAlpha; got != 0 {
+		t.Errorf("alpha=-3 effective_alpha = %v, want clamped 0", got)
+	}
+}
+
+func isOut(r models.SearchResult) bool {
+	return r.Availability == "OUT_OF_STOCK" || (r.AvailableQuantity != nil && *r.AvailableQuantity <= 0)
+}
+
+// Issue #3: unavailable products are always ordered last; only_in_stock removes them.
+func TestUnavailableLastAndOnlyInStock(t *testing.T) {
+	r := newTestRouter()
+	all := doSearch(t, r, "q=shoes&limit=15")
+	seenOut := false
+	for _, res := range all.Results {
+		if isOut(res) {
+			seenOut = true
+		} else if seenOut {
+			t.Fatalf("available product %s ranked after an unavailable one: %s", res.ID, ids(all.Results))
+		}
+	}
+	if !seenOut {
+		t.Fatalf("seed catalog should yield at least one OUT_OF_STOCK result: %s", ids(all.Results))
+	}
+	inStock := doSearch(t, r, "q=shoes&limit=15&only_in_stock=true")
+	for _, res := range inStock.Results {
+		if isOut(res) {
+			t.Fatalf("only_in_stock=true returned unavailable product %s", res.ID)
+		}
+	}
+	if len(inStock.Results) == 0 || len(inStock.Results) >= len(all.Results) {
+		t.Fatalf("only_in_stock should drop unavailable items: %d vs %d", len(inStock.Results), len(all.Results))
+	}
+}
+
+// Issue #3: channel filter via GET and POST (top-level JSON fields).
+func TestChannelFilterGetAndPost(t *testing.T) {
+	r := newTestRouter()
+	store := doSearch(t, r, "q=shoes&limit=15&channel=store")
+	if len(store.Results) == 0 {
+		t.Fatal("expected store-channel results")
+	}
+	for _, res := range store.Results {
+		found := false
+		for _, c := range res.Channels {
+			found = found || c == "store"
+		}
+		if !found {
+			t.Fatalf("channel=store returned %s with channels %v", res.ID, res.Channels)
+		}
+	}
+	body, _ := json.Marshal(map[string]interface{}{"query": "shoes", "limit": 15, "channel": "store", "only_in_stock": true})
+	req := httptest.NewRequest(http.MethodPost, "/api/search", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	var resp models.SearchResponse
+	if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &resp) != nil {
+		t.Fatalf("POST /api/search status=%d body=%s", w.Code, w.Body.String())
+	}
+	for _, res := range resp.Results {
+		if isOut(res) {
+			t.Fatalf("POST only_in_stock returned unavailable %s", res.ID)
+		}
+	}
+	if ids(resp.Results) == "" {
+		t.Fatal("POST with channel=store&only_in_stock should return results")
+	}
+}
+
+func newTokenRouter(token string) *gin.Engine {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	cfg := &config.Config{ProjectID: "psearch-project", ActiveEmbeddingVersion: "v1", GeminiEmbeddingDimension: 1024,
+		DefaultAlpha: 0.5, DefaultLimit: 10, UseMemoryStore: true, AdminToken: token}
+	SetupRouter(r, cfg)
+	return r
+}
+
+func postVersion(r *gin.Engine, token, body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, "/api/config/embedding-version", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("X-Admin-Token", token)
+	}
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	return w
+}
+
+// Issue #2: runtime Blue/Green toggle is admin-protected and validated.
+func TestEmbeddingVersionEndpoint(t *testing.T) {
+	if w := postVersion(newTokenRouter(""), "anything", `{"version":"v2"}`); w.Code != http.StatusForbidden {
+		t.Fatalf("POST with ADMIN_TOKEN unset: status %d, want 403", w.Code)
+	}
+	r := newTokenRouter("s3cret")
+	if w := postVersion(r, "", `{"version":"v2"}`); w.Code != http.StatusForbidden {
+		t.Fatalf("POST without token: status %d, want 403", w.Code)
+	}
+	if w := postVersion(r, "wrong", `{"version":"v2"}`); w.Code != http.StatusForbidden {
+		t.Fatalf("POST wrong token: status %d, want 403", w.Code)
+	}
+	if w := postVersion(r, "s3cret", `{"version":"v9"}`); w.Code != http.StatusBadRequest {
+		t.Fatalf("POST invalid version: status %d, want 400", w.Code)
+	}
+	if w := postVersion(r, "s3cret", `{"version":"v2"}`); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"active_embedding_version":"v2"`) {
+		t.Fatalf("POST valid: status %d body %s", w.Code, w.Body.String())
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/info", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	var info map[string]interface{}
+	_ = json.Unmarshal(w.Body.Bytes(), &info)
+	if info["active_embedding_version"] != "v2" || info["vector_dimensions"] != float64(1024) {
+		t.Fatalf("info after switch = %v / %v", info["active_embedding_version"], info["vector_dimensions"])
+	}
+	if _, ok := info["embedding_cache"]; !ok {
+		t.Fatal("/api/info must include embedding_cache stats")
 	}
 }
