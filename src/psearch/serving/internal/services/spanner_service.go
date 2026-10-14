@@ -127,7 +127,7 @@ func (s *SpannerService) SeedIfEmpty(ctx context.Context) error {
 			stock = int64(*p.AvailableQuantity)
 		}
 		muts = append(muts, spanner.InsertOrUpdate("products",
-			[]string{"product_id", "product_data", "title", "description", "category", "brand", "price", "is_available", "stock", "is_visible", "channels", "embedding", "timestamp"},
+			[]string{"product_id", "product_data", "title", "description", "category", "brand", "price", "is_available", "stock", "is_visible", "channels", "tenant_id", "locale", "embedding", "timestamp"},
 			[]interface{}{
 				p.ID,
 				spanner.NullJSON{Value: json.RawMessage(rawJSON), Valid: true},
@@ -140,6 +140,8 @@ func (s *SpannerService) SeedIfEmpty(ctx context.Context) error {
 				stock,
 				true,
 				p.Channels,
+				p.TenantID,
+				p.Locale,
 				emb,
 				spanner.CommitTimestamp,
 			},
@@ -194,7 +196,10 @@ func (s *SpannerService) HybridSearchDetailed(ctx context.Context, query string,
 			// Falling back to the in-memory engine here would mask the outage with
 			// deterministic 768-d vector scores.
 			return SearchOutcome{Results: res, RetrievalMode: RetrievalLexicalOnly}, nil
-		case len(res) > 0:
+		default:
+			// A successful Spanner query is authoritative even when it returns no rows
+			// (e.g. tenant/category filters exclude everything). Falling back to the
+			// in-memory seed engine here could leak products Spanner filtered out.
 			mode := RetrievalHybridV1
 			if plan.column == vectorColumnV2 {
 				mode = RetrievalHybridV2
@@ -257,21 +262,35 @@ func (s *SpannerService) planVectorQuery(ctx context.Context, query string) vect
 // visible, all channels, available.
 const catalogFilterSQL = `COALESCE(is_visible, TRUE)
 					AND (@channel = '' OR @channel IN UNNEST(IFNULL(channels, ['web', 'mobile', 'store'])))
-					AND (NOT @only_available OR (IFNULL(is_available, TRUE) AND IFNULL(stock, 1) > 0))`
+					AND (NOT @only_available OR (IFNULL(is_available, TRUE) AND IFNULL(stock, 1) > 0))
+					AND IFNULL(tenant_id, 'default') = @tenant_id
+					AND (@locale = '' OR IFNULL(locale, '') = @locale)
+					AND (@category = '' OR LOWER(IFNULL(category, '')) = @category)
+					AND (@brand = '' OR LOWER(IFNULL(brand, '')) = @brand)`
 
 // buildHybridSQL renders the RRF hybrid query. column is always one of the
 // package constants (never user input). Unavailable products (is_available =
 // FALSE or stock <= 0) are always ordered after available ones.
 func buildHybridSQL(column string, lexicalOnly bool) string {
+	return buildHybridSQLWith(column, lexicalOnly, false)
+}
+
+// buildHybridSQLWith optionally searches the accent-folded tokenlists
+// (title_tokens_folded / description_tokens_folded, migration 014b).
+func buildHybridSQLWith(column string, lexicalOnly, folded bool) string {
+	titleTok, descTok := "title_tokens", "description_tokens"
+	if folded {
+		titleTok, descTok = "title_tokens_folded", "description_tokens_folded"
+	}
 	fts := `
 		fts AS (
 			SELECT offset + 1 AS rank, product_id, title, product_data, is_available, stock
 			FROM UNNEST(ARRAY(
 				SELECT AS STRUCT product_id, title, product_data, is_available, stock
 				FROM products
-				WHERE (SEARCH(title_tokens, @query_text) OR SEARCH(description_tokens, @query_text))
+				WHERE (SEARCH(` + titleTok + `, @query_text) OR SEARCH(` + descTok + `, @query_text))
 					AND ` + catalogFilterSQL + `
-				ORDER BY (SCORE(title_tokens, @query_text) + SCORE(description_tokens, @query_text)) DESC
+				ORDER BY (SCORE(` + titleTok + `, @query_text) + SCORE(` + descTok + `, @query_text)) DESC
 				LIMIT @limit
 			)) WITH OFFSET AS offset
 		)`
@@ -359,13 +378,22 @@ func matchesChannel(requested string, channels []string) bool {
 }
 
 func (s *SpannerService) spannerHybridSearch(ctx context.Context, query string, limit int, minScore float64, alpha float64, plan vectorPlan, filters models.SearchFilters) ([]models.SearchResult, error) {
-	sql := buildHybridSQL(plan.column, plan.lexicalOnly)
+	sql := buildHybridSQLWith(plan.column, plan.lexicalOnly, s.config.TextFolding)
+	queryText := query
+	if s.config.TextFolding {
+		queryText = FoldAccents(query)
+	}
+	f := normalizeFilters(filters)
 	params := map[string]interface{}{
-		"query_text":     query,
+		"query_text":     queryText,
+		"tenant_id":      f.TenantID,
+		"locale":         f.Locale,
+		"category":       f.Category,
+		"brand":          f.Brand,
 		"alpha":          alpha,
 		"limit":          int64(limit),
-		"channel":        filters.Channel,
-		"only_available": filters.OnlyInStock,
+		"channel":        f.Channel,
+		"only_available": f.OnlyInStock,
 	}
 	if !plan.lexicalOnly {
 		params["query_embedding"] = plan.embedding
@@ -435,7 +463,8 @@ func (s *SpannerService) spannerHybridSearch(ctx context.Context, query string, 
 }
 
 func (s *SpannerService) memoryHybridSearch(query string, limit int, minScore float64, alpha float64, filters models.SearchFilters) []models.SearchResult {
-	qLower := strings.ToLower(strings.TrimSpace(query))
+	filters = normalizeFilters(filters)
+	qLower := FoldAccents(strings.ToLower(strings.TrimSpace(query)))
 	qTokens := strings.Fields(qLower)
 	qVec := DeterministicEmbedding(query, 768)
 
@@ -452,7 +481,7 @@ func (s *SpannerService) memoryHybridSearch(query string, limit int, minScore fl
 
 	items := make([]scored, len(s.seedProducts))
 	for i, p := range s.seedProducts {
-		docText := strings.ToLower(p.Title + " " + p.Description + " " + strings.Join(p.Brands, " ") + " " + strings.Join(p.Categories, " "))
+		docText := FoldAccents(strings.ToLower(p.Title + " " + p.Description + " " + strings.Join(p.Brands, " ") + " " + strings.Join(p.Categories, " ")))
 		pVec := DeterministicEmbedding(docText, 768)
 		vecSim := CosineSimilarity(qVec, pVec)
 
@@ -461,7 +490,7 @@ func (s *SpannerService) memoryHybridSearch(query string, limit int, minScore fl
 			txtRaw = 1.0
 		} else {
 			for _, tok := range qTokens {
-				if strings.Contains(strings.ToLower(p.Title), tok) {
+				if strings.Contains(FoldAccents(strings.ToLower(p.Title)), tok) {
 					txtRaw += 2.0
 				}
 				if strings.Contains(docText, tok) {
@@ -504,7 +533,7 @@ func (s *SpannerService) memoryHybridSearch(query string, limit int, minScore fl
 		if filters.OnlyInStock && isUnavailable(items[i].prod.Availability, items[i].prod.AvailableQuantity) {
 			continue
 		}
-		if !matchesChannel(filters.Channel, items[i].prod.Channels) {
+		if !matchesChannel(filters.Channel, items[i].prod.Channels) || !matchesCatalog(filters, items[i].prod) {
 			continue
 		}
 		items[i].vecRRF = 1.0 / float64(60+items[i].vecRank)
@@ -548,4 +577,47 @@ func (s *SpannerService) memoryHybridSearch(query string, limit int, minScore fl
 		out = out[:limit]
 	}
 	return out
+}
+
+// normalizeFilters lowercases/trims filter values and applies defaults.
+func normalizeFilters(f models.SearchFilters) models.SearchFilters {
+	f.Channel = strings.ToLower(strings.TrimSpace(f.Channel))
+	f.Category = strings.ToLower(strings.TrimSpace(f.Category))
+	f.Brand = strings.ToLower(strings.TrimSpace(f.Brand))
+	f.TenantID = strings.TrimSpace(f.TenantID)
+	if f.TenantID == "" {
+		f.TenantID = "default"
+	}
+	f.Locale = strings.TrimSpace(f.Locale)
+	return f
+}
+
+// matchesCatalog applies tenant / locale / category / brand filters in memory mode.
+func matchesCatalog(f models.SearchFilters, p models.SearchResult) bool {
+	tenant := p.TenantID
+	if tenant == "" {
+		tenant = "default"
+	}
+	if tenant != f.TenantID {
+		return false
+	}
+	if f.Locale != "" && p.Locale != f.Locale {
+		return false
+	}
+	if f.Category != "" && !containsFold(p.Categories, f.Category) {
+		return false
+	}
+	if f.Brand != "" && !containsFold(p.Brands, f.Brand) {
+		return false
+	}
+	return true
+}
+
+func containsFold(values []string, want string) bool {
+	for _, v := range values {
+		if strings.EqualFold(v, want) {
+			return true
+		}
+	}
+	return false
 }

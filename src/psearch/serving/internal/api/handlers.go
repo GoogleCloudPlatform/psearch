@@ -101,6 +101,7 @@ func (c *Controller) Search(ctx *gin.Context) {
 		req.Category = ctx.Query("category")
 		req.Brand = ctx.Query("brand")
 		req.Locale = ctx.Query("locale")
+		req.TenantID = ctx.Query("tenant_id")
 		req.Channel = ctx.Query("channel")
 		req.CEP = ctx.Query("cep")
 		if v := ctx.Query("only_in_stock"); v == "true" || v == "1" {
@@ -131,7 +132,22 @@ func (c *Controller) Search(ctx *gin.Context) {
 		alpha = 1
 	}
 
-	outcome, err := c.spannerSvc.HybridSearchDetailed(ctx.Request.Context(), req.Query, limit, minScore, alpha, models.SearchFilters{OnlyInStock: req.OnlyInStock, Channel: strings.ToLower(strings.TrimSpace(req.Channel))})
+	filters := models.SearchFilters{
+		OnlyInStock: req.OnlyInStock,
+		Channel:     strings.ToLower(strings.TrimSpace(req.Channel)),
+		Category:    req.Category,
+		Brand:       req.Brand,
+		TenantID:    req.TenantID,
+		Locale:      req.Locale,
+	}
+	// Facets are aggregated over a wider candidate set (top facetCandidates) than
+	// the page returned to the client.
+	const facetCandidates = 100
+	candidateLimit := limit
+	if candidateLimit < facetCandidates {
+		candidateLimit = facetCandidates
+	}
+	outcome, err := c.spannerSvc.HybridSearchDetailed(ctx.Request.Context(), req.Query, candidateLimit, minScore, alpha, filters)
 	results := outcome.Results
 	if results == nil {
 		results = []models.SearchResult{} // always serialize as [] (never null)
@@ -143,12 +159,36 @@ func (c *Controller) Search(ctx *gin.Context) {
 	if outcome.RetrievalMode == services.RetrievalLexicalOnly {
 		alpha = 0 // vector leg was not executed
 	}
+	ids := make([]string, 0, len(results))
+	for _, r := range results {
+		ids = append(ids, r.ID)
+	}
+	facetStart := time.Now()
+	facets, ferr := c.spannerSvc.Facets(ctx.Request.Context(), ids)
+	facetsMs := float64(time.Since(facetStart).Microseconds()) / 1000.0
+	if ferr != nil {
+		log.Printf("WARN: facets unavailable: %v", ferr)
+		facets, facetsMs = nil, 0
+	}
+	candidates := len(results)
+	if len(results) > limit {
+		results = results[:limit]
+	}
+	tenant := strings.TrimSpace(req.TenantID)
+	if tenant == "" {
+		tenant = "default"
+	}
 
 	ctx.JSON(http.StatusOK, models.SearchResponse{
 		Query:            req.Query,
 		EffectiveAlpha:   alpha,
 		Results:          results,
 		TotalFound:       len(results),
+		Candidates:       candidates,
+		Facets:           facets,
+		FacetsLatencyMs:  facetsMs,
+		TenantID:         tenant,
+		Locale:           strings.TrimSpace(req.Locale),
 		LatencyMs:        float64(time.Since(start).Microseconds()) / 1000.0,
 		BackendMode:      c.spannerSvc.BackendMode(),
 		EmbeddingVersion: c.config.ActiveVersion(),

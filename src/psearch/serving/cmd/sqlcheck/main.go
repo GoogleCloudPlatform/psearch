@@ -42,6 +42,9 @@ func main() {
 		{"shoes", 0.5, models.SearchFilters{OnlyInStock: true}},
 		{"shoes", 0.5, models.SearchFilters{Channel: "store"}},
 		{"tenis", 0.5, models.SearchFilters{Channel: "mobile", OnlyInStock: true}},
+		{"tenis", 0, models.SearchFilters{Locale: "pt-BR"}},
+		{"notebook", 0.5, models.SearchFilters{Category: "Computers", Brand: "Acer", TenantID: "default"}},
+		{"shoes", 0.5, models.SearchFilters{TenantID: "acme"}},
 	}
 	failed := false
 	for _, c := range cases {
@@ -52,6 +55,13 @@ func main() {
 			continue
 		}
 		log.Printf("OK   q=%q alpha=%.1f filters=%+v rows=%d mode=%s", c.q, c.alpha, c.filters, n, mode)
+	}
+	// Facet queries over the full catalog.
+	if f, err := svc.Facets(ctx, []string{"prod-001", "prod-002", "prod-004", "prod-012"}); err != nil {
+		failed = true
+		log.Printf("FAIL facets: %v", err)
+	} else {
+		log.Printf("OK   facets categories=%v price_ranges=%v availability=%v", f.Categories, f.PriceRanges, f.Availability)
 	}
 	if failed {
 		os.Exit(1)

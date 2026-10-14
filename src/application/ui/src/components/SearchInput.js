@@ -42,11 +42,15 @@ const SearchInput = memo(({
     setChannel: controlledSetChannel,
     onlyInStock: controlledOnlyInStock,
     setOnlyInStock: controlledSetOnlyInStock,
+    tenantId: controlledTenantId,
+    locale: controlledLocale,
 }) => {
     const [inputValue, setInputValue] = useState('');
     const [internalAlpha, setInternalAlpha] = useState(0.5);
     const [internalChannel, setInternalChannel] = useState('');
     const [internalOnlyInStock, setInternalOnlyInStock] = useState(false);
+    const [internalTenantId] = useState('default');
+    const [internalLocale] = useState('');
     const debounceTimerRef = useRef(null);
 
     const alpha = controlledAlpha !== undefined ? controlledAlpha : internalAlpha;
@@ -55,6 +59,8 @@ const SearchInput = memo(({
     const setChannel = controlledSetChannel || setInternalChannel;
     const onlyInStock = controlledOnlyInStock !== undefined ? controlledOnlyInStock : internalOnlyInStock;
     const setOnlyInStock = controlledSetOnlyInStock || setInternalOnlyInStock;
+    const tenantId = controlledTenantId !== undefined ? controlledTenantId : internalTenantId;
+    const locale = controlledLocale !== undefined ? controlledLocale : internalLocale;
 
     // Local slider value for responsive dragging
     const [localAlpha, setLocalAlpha] = useState(alpha);
@@ -70,7 +76,7 @@ const SearchInput = memo(({
 
     // Submit search only when user explicitly requests it
     const handleSubmitSearch = () => {
-        onSearch(inputValue, { alpha: localAlpha, channel, onlyInStock });
+        onSearch(inputValue, { alpha: localAlpha, channel, onlyInStock, tenantId, locale });
     };
 
     // Handle Enter key press

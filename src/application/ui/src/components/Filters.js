@@ -53,6 +53,9 @@ const FilterSection = ({ filterConfig, selectedOptions, onOptionChange }) => {
                             />
                             <label htmlFor={`${filterConfig.id}-${option.value || option}`}>
                                 {option.label || option}
+                                {option.count !== undefined && !String(option.label || '').includes(`(${option.count})`) && (
+                                    <span className="filter-count"> ({option.count})</span>
+                                )}
                             </label>
                         </div>
                     ))}
@@ -77,8 +80,9 @@ const FilterSection = ({ filterConfig, selectedOptions, onOptionChange }) => {
  * @param {Array} filterConfigs - Array of filter configuration objects
  * @param {Object} selectedFilters - Object with selected filter values by filter ID
  * @param {Function} onFilterChange - Callback for filter changes
+ * @param {number|null} facetsLatencyMs - Latency in ms for server-side facets computation
  */
-const Filters = ({ filterConfigs = [], selectedFilters = {}, onFilterChange }) => {
+const Filters = ({ filterConfigs = [], selectedFilters = {}, onFilterChange, facetsLatencyMs = null }) => {
     // Handler that processes the checkbox changes and calls the parent component's handler
     const handleCheckboxChange = (event, filterId) => {
         const { value, checked } = event.target;
@@ -95,7 +99,12 @@ const Filters = ({ filterConfigs = [], selectedFilters = {}, onFilterChange }) =
 
     return (
         <div className="filters-container">
-            <h2>Filters</h2>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <h2>Filters</h2>
+                {facetsLatencyMs !== null && facetsLatencyMs !== undefined && (
+                    <span style={{ fontSize: '11px', color: '#64748b' }}>{Number(facetsLatencyMs).toFixed(1)}ms</span>
+                )}
+            </div>
 
             {filterConfigs.map(filterConfig => (
                 <FilterSection
