@@ -1,8 +1,10 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"strconv"
+	"sync/atomic"
 
 	"github.com/joho/godotenv"
 )
@@ -18,7 +20,9 @@ type Config struct {
 	EmbeddingModelName       string // Gemini embedding model used for the v2 vector column
 	GeminiEmbeddingDimension int    // output_dimensionality requested from the embedding model (1024)
 	EmbeddingDimension       int    // dimension of the ACTIVE vector column (v1=768 legacy, v2=GeminiEmbeddingDimension)
-	ActiveEmbeddingVersion   string
+	ActiveEmbeddingVersion   string // initial version from env; use ActiveVersion() at runtime
+	AdminToken               string // guards POST /api/config/embedding-version (empty = disabled)
+	activeVersion            atomic.Pointer[string]
 	DefaultAlpha             float64
 	DefaultLimit             int
 	MinScoreValue            float64
@@ -40,6 +44,7 @@ func Load() (*Config, error) {
 		EmbeddingModelName:       getEnv("EMBEDDING_MODEL_NAME", getEnv("GEMINI_MODEL_NAME", "gemini-embedding-2")),
 		GeminiEmbeddingDimension: 1024,
 		ActiveEmbeddingVersion:   getEnv("ACTIVE_EMBEDDING_VERSION", "v1"),
+		AdminToken:               os.Getenv("ADMIN_TOKEN"),
 		DefaultAlpha:             0.5,
 		DefaultLimit:             20,
 		MinScoreValue:            0.0,
@@ -72,7 +77,25 @@ func Load() (*Config, error) {
 const LegacyEmbeddingDimension = 768
 
 // UseGeminiEmbeddings reports whether the v2 (Gemini, embedding_v2) vector column is active.
-func (c *Config) UseGeminiEmbeddings() bool { return c.ActiveEmbeddingVersion == "v2" }
+func (c *Config) UseGeminiEmbeddings() bool { return c.ActiveVersion() == "v2" }
+
+// ActiveVersion returns the embedding version currently in effect. It can be
+// switched at runtime (per instance) via SetActiveVersion.
+func (c *Config) ActiveVersion() string {
+	if p := c.activeVersion.Load(); p != nil {
+		return *p
+	}
+	return c.ActiveEmbeddingVersion
+}
+
+// SetActiveVersion switches the active embedding version ("v1" or "v2") for this instance.
+func (c *Config) SetActiveVersion(v string) error {
+	if v != "v1" && v != "v2" {
+		return fmt.Errorf("invalid embedding version %q (want v1 or v2)", v)
+	}
+	c.activeVersion.Store(&v)
+	return nil
+}
 
 // ActiveDimension returns the dimension of the currently active vector column.
 func (c *Config) ActiveDimension() int {

@@ -1,0 +1,2 @@
+ALTER TABLE products ADD COLUMN is_visible BOOL;
+ALTER TABLE products ADD COLUMN channels ARRAY<STRING(64)>

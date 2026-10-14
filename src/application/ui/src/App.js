@@ -54,6 +54,11 @@ function ProductSearch() {
     const [products, setProducts] = useState([]);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState(null);
+    const [alpha, setAlpha] = useState(0.5);
+    const [channel, setChannel] = useState('');
+    const [onlyInStock, setOnlyInStock] = useState(false);
+    const [effectiveAlpha, setEffectiveAlpha] = useState(null);
+    const [retrievalMode, setRetrievalMode] = useState(null);
     // State for the filters component - now a dynamic object
     const [selectedFilters, setSelectedFilters] = useState({});
     // Store filter configurations
@@ -348,14 +353,29 @@ function ProductSearch() {
         setLoading(true);
         setError(null);
         try {
-            const response = await axios.post(`${API_URL}/search`, {
-                query: activeSearchQuery, // Use activeSearchQuery instead of searchQuery
+            const payload = {
+                query: activeSearchQuery,
                 limit: 300,
                 min_score: 0.01,
-                alpha: 0.0,
-            });
+                alpha: typeof alpha === 'number' ? alpha : 0.5,
+                only_in_stock: Boolean(onlyInStock),
+            };
+            if (channel && channel !== 'All' && channel !== 'all') {
+                payload.channel = channel;
+            }
+
+            const response = await axios.post(`${API_URL}/search`, payload);
 
             console.log("API Response:", JSON.stringify(response.data, null, 2));
+
+            if (response.data) {
+                if (response.data.effective_alpha !== undefined) {
+                    setEffectiveAlpha(response.data.effective_alpha);
+                }
+                if (response.data.retrieval_mode !== undefined) {
+                    setRetrievalMode(response.data.retrieval_mode);
+                }
+            }
 
             // Simple processing - just map products without modifying anything
             const processedResults = response.data.results || [];
@@ -391,7 +411,7 @@ function ProductSearch() {
         } finally {
             setLoading(false);
         }
-    }, [activeSearchQuery]); // Changed dependency from searchQuery to activeSearchQuery
+    }, [activeSearchQuery, alpha, channel, onlyInStock]); // Changed dependency from searchQuery to activeSearchQuery
 
     // Handler for filter changes from the Filters component - now works with dynamic filter IDs
     const handleFilterChange = useCallback((filterId, value, isChecked) => {
@@ -510,11 +530,20 @@ function ProductSearch() {
     }, [products, selectedFilters]);
 
     // Handle search submission from SearchInput component - now resets all filters
-    const handleSearch = useCallback((searchText) => {
+    const handleSearch = useCallback((searchText, options = {}) => {
         // Reset all filters when a new search is performed
         setSelectedFilters({});
+        if (options.alpha !== undefined) {
+            setAlpha(options.alpha);
+        }
+        if (options.channel !== undefined) {
+            setChannel(options.channel);
+        }
+        if (options.onlyInStock !== undefined) {
+            setOnlyInStock(options.onlyInStock);
+        }
         // Update active search query which triggers API call
-        setActiveSearchQuery(searchText);
+        setActiveSearchQuery(typeof searchText === 'string' ? searchText : searchText?.query || '');
         // Reset AI filter suggestions when a new search is performed
         setShowAIFilterSuggestions(true);
     }, []);
@@ -681,12 +710,22 @@ function ProductSearch() {
                                                     ${product.priceInfo.originalPrice}
                                                 </Typography>
                                             )}
-                                        <Chip
-                                            label={product.availability}
-                                            color={product.availability === 'IN_STOCK' ? 'success' : 'error'}
-                                            size="small"
-                                            sx={{ mt: 1 }}
-                                        />
+                                        {(() => {
+                                            const isStockIn = product.availability === 'IN_STOCK';
+                                            const stockBadge = isStockIn
+                                                ? (product.availableQuantity !== undefined && product.availableQuantity !== null
+                                                    ? `IN_STOCK (${product.availableQuantity} unid.)`
+                                                    : 'IN_STOCK')
+                                                : 'OUT_OF_STOCK';
+                                            return (
+                                                <Chip
+                                                    label={stockBadge}
+                                                    color={isStockIn ? 'success' : 'error'}
+                                                    size="small"
+                                                    sx={{ mt: 1 }}
+                                                />
+                                            );
+                                        })()}
                                     </Box>
                                 </CardContent>
                             </Card>
@@ -777,9 +816,17 @@ function ProductSearch() {
                     maxWidth: { xs: '100%', sm: '66.666%', md: '75%' } 
                 }}>
                     {/* Use the isolated SearchInput component */}
-                    <SearchInput onSearch={handleSearch} />
+                    <SearchInput
+                        onSearch={handleSearch}
+                        alpha={alpha}
+                        setAlpha={setAlpha}
+                        channel={channel}
+                        setChannel={setChannel}
+                        onlyInStock={onlyInStock}
+                        setOnlyInStock={setOnlyInStock}
+                    />
 
-                    {/* Display search result count */}
+                    {/* Display search result count and search metadata */}
                     {/* Results container with min-height to prevent layout shifts */}
                     <Box sx={{
                         minHeight: '50vh',
@@ -795,9 +842,21 @@ function ProductSearch() {
                             allProducts={products} // Pass all products for smart filtering
                         />
 
-                        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-                            {products.length ? `Found ${products.length} products` : 'No products found. Try a search!'}
-                        </Typography>
+                        <Box sx={{ mb: 2, display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 1 }}>
+                            <Typography variant="body2" color="text.secondary">
+                                {products.length ? `Found ${products.length} products` : 'No products found. Try a search!'}
+                                {effectiveAlpha !== null && ` • effective_alpha: ${effectiveAlpha}`}
+                                {retrievalMode && ` • retrieval_mode: ${retrievalMode}`}
+                            </Typography>
+                            <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                                {effectiveAlpha !== null && (
+                                    <Chip size="small" variant="outlined" label={`effective_alpha: ${effectiveAlpha}`} />
+                                )}
+                                {retrievalMode && (
+                                    <Chip size="small" color="primary" variant="outlined" label={`retrieval_mode: ${retrievalMode}`} />
+                                )}
+                            </Box>
+                        </Box>
 
                         {loading && <Typography>Loading products...</Typography>}
                         {error && <Typography color="error">Error: {error.message}</Typography>}
