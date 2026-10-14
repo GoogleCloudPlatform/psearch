@@ -17,6 +17,8 @@
 Conversational Search Service - Generates natural filter questions for product search
 """
 
+import os
+
 from google import genai
 from google.genai import types
 import logging
@@ -48,7 +50,7 @@ class ConversationalSearchService:
             project=project_id,
             location=location,
         )
-        self.model = "gemini-2.0-flash-001"
+        self.model = os.environ.get("GEMINI_LITE_MODEL", "gemini-3.5-flash-lite")
 
     def process_query(
         self,

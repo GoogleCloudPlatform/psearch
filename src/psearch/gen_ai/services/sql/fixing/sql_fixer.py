@@ -200,7 +200,7 @@ CORRECTED SQL QUERY:
         """
         Attempts a simple, direct fix of the SQL script based on the error message,
         expecting direct SQL text output from the model.
-        Uses the specified model (gemini-2.5-pro-preview-05-06 by default via GenAIClient).
+        Uses the specified model (gemini-3.5-flash by default via GenAIClient / GEMINI_MODEL).
 
         Args:
             sql_script_to_fix: The SQL script that has an error.
