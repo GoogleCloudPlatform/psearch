@@ -52,6 +52,19 @@ import axios from 'axios';
 import config from './config';
 const API_URL = config.apiUrl;
 
+const COLOR_SWATCH_MAP = {
+    preto: '#1e293b',
+    black: '#1e293b',
+    branco: '#f8fafc',
+    white: '#f8fafc',
+    azul: '#2563eb',
+    blue: '#2563eb',
+    prata: '#94a3b8',
+    silver: '#94a3b8',
+    grafite: '#475569',
+    graphite: '#475569',
+};
+
 function ProductSearch({
     tenantId: propTenantId,
     setTenantId: propSetTenantId,
@@ -109,6 +122,8 @@ function ProductSearch({
     const [effectivePriceTableId, setEffectivePriceTableId] = useState('');
     const [sortBy, setSortBy] = useState('');
     const [effectiveSortBy, setEffectiveSortBy] = useState('');
+    const [color, setColor] = useState('');
+    const [size, setSize] = useState('');
     const [serverFacets, setServerFacets] = useState(null);
     const [facetsLatencyMs, setFacetsLatencyMs] = useState(null);
     // State for the filters component - now a dynamic object
@@ -244,13 +259,16 @@ function ProductSearch({
                     if (product.colorInfo?.colorFamilies) {
                         product.colorInfo.colorFamilies.forEach(color => allColors.add(color));
                     }
+                    if (Array.isArray(product.available_colors)) {
+                        product.available_colors.forEach(color => allColors.add(color));
+                    }
                 });
 
                 const colors = Array.from(allColors);
                 if (colors.length > 0) {
                     configs.push({
                         id: 'colors',
-                        title: 'Colors',
+                        title: 'Cor',
                         priority: 70, // Medium-high priority
                         options: colors.map(color => ({ label: color, value: color })),
                         type: 'checkbox'
@@ -265,13 +283,16 @@ function ProductSearch({
                     if (product.sizes) {
                         product.sizes.forEach(size => allSizes.add(size));
                     }
+                    if (Array.isArray(product.available_sizes)) {
+                        product.available_sizes.forEach(size => allSizes.add(size));
+                    }
                 });
 
                 const sizes = Array.from(allSizes);
                 if (sizes.length > 0) {
                     configs.push({
                         id: 'sizes',
-                        title: 'Sizes',
+                        title: 'Tamanho',
                         priority: 60, // Medium priority
                         options: sizes.map(size => ({ label: size, value: size })),
                         type: 'checkbox'
@@ -454,6 +475,34 @@ function ProductSearch({
             });
         }
 
+        if (Array.isArray(facets.colors) && facets.colors.length > 0) {
+            configs.push({
+                id: 'colors',
+                title: 'Cor',
+                priority: 75,
+                type: 'checkbox',
+                options: facets.colors.map(c => ({
+                    label: typeof c === 'object' ? c.value : c,
+                    value: typeof c === 'object' ? c.value : c,
+                    count: typeof c === 'object' ? c.count : undefined,
+                }))
+            });
+        }
+
+        if (Array.isArray(facets.sizes) && facets.sizes.length > 0) {
+            configs.push({
+                id: 'sizes',
+                title: 'Tamanho',
+                priority: 72,
+                type: 'checkbox',
+                options: facets.sizes.map(s => ({
+                    label: typeof s === 'object' ? s.value : s,
+                    value: typeof s === 'object' ? s.value : s,
+                    count: typeof s === 'object' ? s.count : undefined,
+                }))
+            });
+        }
+
         if (Array.isArray(facets.availability) && facets.availability.length > 0) {
             configs.push({
                 id: 'availability',
@@ -505,6 +554,12 @@ function ProductSearch({
     const selectedBrand = (selectedFilters.brands && selectedFilters.brands.length > 0)
         ? selectedFilters.brands[0]
         : '';
+    const selectedColor = color || ((selectedFilters.colors && selectedFilters.colors.length > 0)
+        ? selectedFilters.colors[0]
+        : '');
+    const selectedSize = size || ((selectedFilters.sizes && selectedFilters.sizes.length > 0)
+        ? selectedFilters.sizes[0]
+        : '');
 
     const fetchProducts = useCallback(async (searchParams) => {
         setLoading(true);
@@ -525,6 +580,12 @@ function ProductSearch({
             const sortByToUse = (searchParams && searchParams.sortBy !== undefined)
                 ? searchParams.sortBy
                 : sortBy;
+            const colorToUse = (searchParams && searchParams.color !== undefined)
+                ? searchParams.color
+                : selectedColor;
+            const sizeToUse = (searchParams && searchParams.size !== undefined)
+                ? searchParams.size
+                : selectedSize;
             const sessionIdToUse = (searchParams && searchParams.sessionId !== undefined)
                 ? searchParams.sessionId
                 : (sessionIdRef.current || getSessionId());
@@ -556,6 +617,9 @@ function ProductSearch({
                 if (extractedFiltersToUse.category) {
                     payload.category = String(extractedFiltersToUse.category);
                 }
+                if (extractedFiltersToUse.color) {
+                    payload.color = String(extractedFiltersToUse.color);
+                }
             }
             if (locale) {
                 payload.locale = locale;
@@ -568,6 +632,12 @@ function ProductSearch({
             }
             if (selectedBrand && (!extractedFiltersToUse || !extractedFiltersToUse.brand)) {
                 payload.brand = selectedBrand;
+            }
+            if (colorToUse) {
+                payload.color = colorToUse;
+            }
+            if (sizeToUse) {
+                payload.size = sizeToUse;
             }
             if (cep && cep.trim()) {
                 payload.cep = cep.trim();
@@ -718,7 +788,7 @@ function ProductSearch({
         } finally {
             setLoading(false);
         }
-    }, [activeSearchQuery, alpha, channel, onlyInStock, selectedCategory, selectedBrand, tenantId, locale, cep, maxSla24h, ltr, priceTableId, sortBy]);
+    }, [activeSearchQuery, alpha, channel, onlyInStock, selectedCategory, selectedBrand, selectedColor, selectedSize, tenantId, locale, cep, maxSla24h, ltr, priceTableId, sortBy]);
 
     // Handler for filter changes from the Filters component - now works with dynamic filter IDs
     const handleFilterChange = useCallback((filterId, value, isChecked) => {
@@ -797,6 +867,14 @@ function ProductSearch({
 
                 case 'colors':
                     return product => {
+                        if (Array.isArray(product.available_colors) &&
+                            product.available_colors.some(c => selectedValues.includes(c))) {
+                            return true;
+                        }
+                        if (Array.isArray(product.variants) &&
+                            product.variants.some(v => v.available && selectedValues.includes(v.color))) {
+                            return true;
+                        }
                         const colorInfo = product.colorInfo;
                         if (!colorInfo) return false;
 
@@ -810,9 +888,18 @@ function ProductSearch({
                     };
 
                 case 'sizes':
-                    return product =>
-                        product.sizes &&
-                        product.sizes.some(size => selectedValues.includes(size));
+                    return product => {
+                        if (Array.isArray(product.available_sizes) &&
+                            product.available_sizes.some(s => selectedValues.includes(s))) {
+                            return true;
+                        }
+                        if (Array.isArray(product.variants) &&
+                            product.variants.some(v => v.available && selectedValues.includes(v.size))) {
+                            return true;
+                        }
+                        return product.sizes &&
+                            product.sizes.some(size => selectedValues.includes(size));
+                    };
 
                 case 'availability':
                     return product => selectedValues.includes(product.availability);
@@ -882,6 +969,12 @@ function ProductSearch({
         if (options.sortBy !== undefined) {
             setSortBy(options.sortBy);
         }
+        if (options.color !== undefined) {
+            setColor(options.color);
+        }
+        if (options.size !== undefined) {
+            setSize(options.size);
+        }
         setParsedQuery(null);
         setActiveExtractedFilters(null);
         activeExtractedFiltersRef.current = null;
@@ -898,13 +991,15 @@ function ProductSearch({
                 parseIntent: options.parseIntent !== undefined ? options.parseIntent : parseIntentRef.current,
                 priceTableId: options.priceTableId !== undefined ? options.priceTableId : priceTableId,
                 sortBy: options.sortBy !== undefined ? options.sortBy : sortBy,
+                color: options.color !== undefined ? options.color : color,
+                size: options.size !== undefined ? options.size : size,
             });
         }
         // Update active search query which triggers API call
         setActiveSearchQuery(nextQuery);
         // Reset AI filter suggestions when a new search is performed
         setShowAIFilterSuggestions(true);
-    }, [setTenantId, setLocale, fetchProducts, activeSearchQuery, priceTableId, sortBy]);
+    }, [setTenantId, setLocale, fetchProducts, activeSearchQuery, priceTableId, sortBy, color, size]);
 
     const handleRemoveExtractedFilter = useCallback((filterKey) => {
         const currentFilters = activeExtractedFiltersRef.current || {};
@@ -1008,7 +1103,7 @@ function ProductSearch({
                         >
                             <Card
                                 sx={{
-                                    height: '300px', // Further reduced height for 6-per-row layout
+                                    minHeight: '300px',
                                     display: 'flex',
                                     flexDirection: 'column',
                                     cursor: 'pointer',
@@ -1029,9 +1124,7 @@ function ProductSearch({
                                     display: 'flex',
                                     flexDirection: 'column',
                                     justifyContent: 'space-between',
-                                    height: '100px', // Further reduced content height for smaller cards
                                     padding: '8px',
-                                    overflow: 'hidden' // Prevent content overflow
                                 }}>
                                     <Box>
                                         <Typography 
@@ -1119,6 +1212,66 @@ function ProductSearch({
                                                     ${product.priceInfo.originalPrice}
                                                 </Typography>
                                             ))}
+                                        {(() => {
+                                            const availColors = Array.isArray(product.available_colors) ? product.available_colors : [];
+                                            const availSizes = Array.isArray(product.available_sizes) ? product.available_sizes : [];
+                                            const variantCount = typeof product.variant_count === 'number'
+                                                ? product.variant_count
+                                                : (Array.isArray(product.variants) ? product.variants.length : 0);
+                                            const displayedCount = availColors.length + availSizes.length;
+                                            const extraVariants = variantCount > displayedCount ? variantCount - displayedCount : 0;
+                                            if (availColors.length === 0 && availSizes.length === 0 && extraVariants === 0) {
+                                                return null;
+                                            }
+                                            return (
+                                                <Box sx={{ display: 'flex', gap: 0.5, alignItems: 'center', flexWrap: 'wrap', mt: 0.75 }}>
+                                                    {availColors.map((c) => {
+                                                        const swatchHex = COLOR_SWATCH_MAP[String(c).toLowerCase()] || '#64748b';
+                                                        return (
+                                                            <Chip
+                                                                key={`color-${c}`}
+                                                                label={c}
+                                                                size="small"
+                                                                variant="outlined"
+                                                                icon={
+                                                                    <Box
+                                                                        component="span"
+                                                                        sx={{
+                                                                            width: 10,
+                                                                            height: 10,
+                                                                            borderRadius: '50%',
+                                                                            backgroundColor: swatchHex,
+                                                                            border: '1px solid #94a3b8',
+                                                                            display: 'inline-block',
+                                                                            ml: '6px !important',
+                                                                        }}
+                                                                    />
+                                                                }
+                                                                sx={{ height: 22, fontSize: '0.7rem' }}
+                                                            />
+                                                        );
+                                                    })}
+                                                    {availSizes.map((sz) => (
+                                                        <Chip
+                                                            key={`size-${sz}`}
+                                                            label={sz}
+                                                            size="small"
+                                                            variant="outlined"
+                                                            sx={{ height: 22, fontSize: '0.7rem', fontWeight: 600 }}
+                                                        />
+                                                    ))}
+                                                    {extraVariants > 0 && (
+                                                        <Chip
+                                                            label={`+${extraVariants} variantes`}
+                                                            size="small"
+                                                            color="primary"
+                                                            variant="outlined"
+                                                            sx={{ height: 22, fontSize: '0.7rem', fontWeight: 600 }}
+                                                        />
+                                                    )}
+                                                </Box>
+                                            );
+                                        })()}
                                         {(() => {
                                             const isStockIn = product.availability === 'IN_STOCK';
                                             const stockBadge = isStockIn
@@ -1330,6 +1483,10 @@ function ProductSearch({
                         setPriceTableId={setPriceTableId}
                         sortBy={sortBy}
                         setSortBy={setSortBy}
+                        color={color}
+                        setColor={setColor}
+                        size={size}
+                        setSize={setSize}
                     />
 
                     {/* Display search result count and search metadata */}

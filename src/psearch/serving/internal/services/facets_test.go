@@ -85,3 +85,18 @@ func TestBuildHybridSQLWith_FoldedAndCatalogFilters(t *testing.T) {
 		t.Error("default SQL must not use folded tokenlists")
 	}
 }
+
+func TestBrowseSQL(t *testing.T) {
+	sql := browseSQL()
+	for _, frag := range []string{"@{OPTIMIZER_VERSION=", "FROM products", "COALESCE(is_visible, TRUE)", "products.clicks", "@sort_by", "LIMIT @limit"} {
+		if !strings.Contains(sql, frag) {
+			t.Errorf("browse SQL missing %q", frag)
+		}
+	}
+	if strings.Contains(sql, " p.") {
+		t.Error("browse SQL must not reference alias p")
+	}
+	if !IsBrowseQuery("  ") || !IsBrowseQuery("*") || IsBrowseQuery("tv") {
+		t.Error("IsBrowseQuery")
+	}
+}

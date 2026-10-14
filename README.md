@@ -1,362 +1,326 @@
-# PSearch: AI-Powered Product Search Platform
+# PSearch: AI-Powered Enterprise Product Search Platform on Cloud Spanner & Vertex AI
 
 ## Overview
 
-PSearch is an advanced product search platform built on Google Cloud Platform. It leverages **Spanner's native hybrid search capabilities**, combining traditional text search with vector similarity search (using embeddings generated via Vertex AI) to understand the semantic meaning behind user queries. This results in more accurate, contextually relevant product search results stored and queried directly within Spanner.
+PSearch is an enterprise product search platform built on Google Cloud. It runs **hybrid retrieval natively in Cloud Spanner** — vector similarity and full-text search fused with Reciprocal Rank Fusion (RRF) in a single SQL statement — and uses **Gemini models on Vertex AI (`global`)** for query embeddings, conversational query understanding and content generation. On top of retrieval it layers merchandising rules, business-signal boosts, learning to rank, session personalization, delivery promises by postal code (CEP) and B2B contract pricing, all exposed through one `/api/search` endpoint.
 
-**Core Features:**
+> **Live hosted endpoints**
+> - Search API and embedded storefront: Cloud Run service `psearch-serving` — open `<SERVICE_URL>/` for the storefront, `<SERVICE_URL>/api/info` for the running configuration.
+> - Find the URLs with `gcloud run services describe psearch-serving --region us-central1 --format='value(status.url)'`. Real project IDs and URLs are intentionally not committed to this repository.
 
-* **Spanner Hybrid Search:** Blends vector similarity and text search directly within Google Cloud Spanner for relevance and efficiency
-* **AI Enhancements:** Includes AI-driven filter suggestions, content enrichment (text with Gemini, images with Imagen), and marketing content generation
-* **Product Filtering:** Supports filtering by various attributes (categories, brands, price, etc.)
-* **Rules Engine:** Allows administrators to configure search behavior (with planned implementation in Spanner)
-* **Scalable Architecture:** Built with microservices on Google Cloud (Cloud Run)
-* **Modern UI:** Responsive React-based user interface with AI feature integration
+**Core features**
 
-## Project Status
+* **Spanner hybrid search** — vector + full-text legs fused with RRF, tunable with `alpha`, filters applied inside both legs.
+* **1024-d semantic vectors** — `gemini-embedding-2` with Blue/Green `v1`/`v2` columns and a two-tier embedding cache.
+* **Conversational queries** — "tênis de corrida até 200 reais" becomes a clean query plus price/brand filters; optional Gemini fallback.
+* **Typo recovery** — "sansung" → "samsung", "geladera" → "geladeira", AND → OR relaxation when nothing matches.
+* **Ranking controls** — merchandising rules (pin/bury/boost), 8 business signals, synonyms at reduced weight, two-stage learning to rank, session personalization.
+* **Commerce context** — stock/visibility/channels, multi-tenant multi-language catalogs, delivery promises by CEP, B2B contract price tables.
+* **Two front ends** — a React application and a zero-dependency storefront embedded in the serving binary.
+
+## Project Status & Capabilities Matrix (Waves 1–6)
 
 | Component | Status | Notes |
-|-----------|--------|-------|
-| Core Search | ✅ Complete | Hybrid search combining vector and text search in Spanner |
-| Frontend UI | ✅ Complete | React-based UI with product search and filtering |
-| Ingestion | ✅ Complete | Spanner Reverse ETL |
-| GenAI | ✅ Complete | Content enrichment, image enhancement, and marketing generation |
-| Rules Engine | 🔄 Refactoring | Currently using mock data, migrating from Firestore to Spanner |
+|---|---|---|
+| Search API (`src/psearch/serving`) | ✅ Live | All functional requirements + SKU variant grouping |
+| React UI (`src/application/ui`) | ✅ Complete | Search, facets, rules manager, session panel, B2B pricing, variants |
+| Embedded storefront (`GET /`) | ✅ Live | Catalog browse, "Show All Catalog", all search controls |
+| Spanner schema | ✅ Applied | Base schema + migrations 011–022 |
+| Gen AI service (`src/psearch/gen_ai`) | ✅ Complete | Enrichment, marketing, images, conversational search, SQL agent |
+| Ingestion (`src/psearch/ingestion_source`, BigQuery scripts) | ✅ Complete | Reverse ETL to Spanner, v2 embedding backfill |
+| Query/click analytics in BigQuery | 🔄 Follow-up | Needed for analytics-driven autocomplete and trained LTR weights |
+
+| Req. | Capability | Issue | Wave |
+|---|---|---|---|
+| 1 | Hybrid search with parametrized `alpha` (RRF) | #78 | 1 |
+| 2 | Vector search: 1024-d, Blue/Green, embedding cache | #79 | 1 |
+| 3 | Availability, visibility, channels; out-of-stock last | #80 | 1 |
+| 4 | Multi-language, multi-tenant catalog; accent folding | #81 | 2 |
+| 5 | Server-side concurrent facets | #82 | 2 |
+| 6 | Merchandising rules + 8 boost signals | #83 | 3 |
+| 7 | Low-relevance synonyms | #84 | 3 |
+| 8 | Delivery promises by CEP (interleaved inventory) | #85 | 3 |
+| 9 | N-gram autocomplete | #86 | 4 |
+| 10 | Two-stage learning to rank | #87 | 4 |
+| 11 | Conversational query understanding | #88 | 5 |
+| 12 | Session-aware personalization | #89 | 5 |
+| 13 | Zero-results recovery & spell check | #90 | 5 |
+| 14 | B2B contract pricing & assortment | #91 | 5 |
+| 15 | Variant grouping / collapse over interleaved SKUs | #93 | 6 |
+| Platform | `gemini-embedding-2` 1024-d via the Gen AI SDK | #77 | — |
+| Platform | `gemini-3.8-flash` (text) & `gemini-4-pro` (pro) | #92 | — |
+
+Further reading: [PRODUCT.md](PRODUCT.md) (requirements) · [DESIGN.md](DESIGN.md) (architecture, full API reference) · [DEPLOYMENT.md](DEPLOYMENT.md) (deployment guide and release log).
 
 ## Architecture
 
-PSearch utilizes a microservices architecture deployed on Google Cloud:
-
 ```mermaid
 graph TD
-    Client[Frontend UI] --> SearchAPI[Serving API]
-    Client --> GenAI[GenAI Service]
-    
-    SearchAPI --> Spanner[(Spanner DB)]
-    SearchAPI --> VertexAI[Vertex AI - Embeddings]
-    
+    Client[React UI] --> SearchAPI[Search API<br/>psearch-serving · Go/Gin · Cloud Run]
+    Store[Embedded storefront GET /] --> SearchAPI
+    Client --> GenAI[Gen AI service<br/>Python · Cloud Run]
+
+    SearchAPI --> Spanner[(Cloud Spanner<br/>catalog · vectors · rules · inventory · prices · sessions)]
+    SearchAPI --> VertexAI[Vertex AI global<br/>gemini-embedding-2 · gemini-3.8-flash]
     GenAI --> VertexAI
-    
-    Ingestion[Ingestion Service] --> Spanner
+    GenAI --> GCS[(Cloud Storage<br/>images)]
+
+    Ingestion[Ingestion service / BigQuery jobs] --> Spanner
+    Ingestion --> BigQuery[(BigQuery<br/>psearch_dataset)]
     Ingestion --> VertexAI
-    Ingestion --> BigQuery[(BigQuery)]
+    Tooling[tooling/enrichment] --> Firestore[(Firestore<br/>enrichment state)]
 ```
 
 ### Core Services
 
-* **Frontend UI (React `src/application/ui/`):** Provides the user interface for searching, filtering, viewing products, and interacting with AI enhancements.
-
-* **Serving API (Go/Gin `src/psearch/serving/`):** Handles search requests, performs hybrid search directly against Spanner using its native vector and text search capabilities, generates query embeddings via Vertex AI, retrieves data from Spanner, and interacts with other services.
-
-* **Rules Management:** Currently implemented as a mock service in the UI with localStorage persistence. Future implementation will use Spanner for rules storage.
-
-* **Ingestion Pipeline (Cloud Run Job/Python `src/psearch/ingestion/`):** Processes product data (e.g., from BigQuery), generates embeddings using Vertex AI, and stores both structured data and embeddings directly into Spanner.
-
-* **GenAI Service (Cloud Run/Python `src/psearch/gen_ai/`):** Provides generative AI capabilities:
-  * Content enrichment with Gemini
-  * Image enhancement with Gemini
-  * Marketing content generation
-  * Conversational search features
+* **Search API (Go/Gin, `src/psearch/serving/`)** — validates requests, decomposes conversational queries, runs the hybrid Spanner statement, recovers zero-result queries, aggregates facets, attaches delivery promises, re-ranks (LTR, session) and serves the embedded storefront. Entrypoints: `cmd/server` (API), `cmd/sqlcheck` (pre-deploy SQL gate), `cmd/backfill-embeddings` (v2 vectors).
+* **React UI (`src/application/ui/`)** — search with all controls, server facets, rules manager (`/manage`), session panel, product details with Gen AI enrichment, source ingestion.
+* **Gen AI service (Python/FastAPI, `src/psearch/gen_ai/`)** — content enrichment, marketing copy, image generation, conversational search, SQL generation/fix agent (`google-genai`, `gemini-3.8-flash` / `gemini-4-pro` / `gemini-3.1-flash-image`).
+* **Ingestion (`src/psearch/ingestion_source/`, `src/iac/bigquery_scripts/`)** — loads catalog data and embeddings from BigQuery into Spanner.
 
 ### Datastores
 
-* **Spanner:** 
-  * Primary storage for structured product data *and* vector embeddings
-  * Enables integrated hybrid search
-  * Planned storage for rules configuration (consolidating all data storage)
-
-* **BigQuery:** 
-  * Used for analytics
-  * Potential source for the ingestion pipeline
+* **Cloud Spanner (`psearch-instance` / `psearch-db`)** — system of record:
+  * `products` with full-text tokenlists (plus accent-folded variants), 768-d `embedding` (v1) and 1024-d `embedding_v2` (v2), availability, visibility, channels, tenant/locale and 8 business signals.
+  * Interleaved hierarchies: `products` → `skus` → `regional_inventory` (delivery promises) and `products` → `product_prices` (B2B pricing).
+  * `merchandising_rules`, `search_synonyms`, `autocomplete_suggestions` (n-gram index), `embedding_cache`, `query_intent_cache`, `user_session_events`.
+* **BigQuery (`psearch_dataset`)** — ingestion source and analytics (autocomplete export, LTR training scripts).
+* **Firestore** — enrichment job state used by `tooling/enrichment`.
+* **Cloud Storage** — generated and enhanced product images.
 
 ## Technology Stack
 
-* **Frontend:** 
-  * React with hooks for state management
-  * Material-UI for components
-  * Axios for API requests
-
-* **Backend:** 
-  * Go (Gin) for high-performance Serving API
-  * Python for AI-related services and data processing
-
-* **Databases:** 
-  * Google Cloud Spanner with vector search capabilities
-  * Google Cloud BigQuery for analytics
-
-* **AI/ML:** 
-  * Google Vertex AI Embeddings for semantic search
-  * Gemini 2.0 for text generation and content enrichment
-  * Gemini for image enhancement and generation
-
-* **Infrastructure:** 
-  * Google Cloud Run for serverless microservices
-  * Google Cloud Build for CI/CD
-  * Terraform for infrastructure as code
-  * Docker for containerization
+* **Frontend:** React 19, Material UI, Axios; embedded HTML/JS storefront.
+* **Backend:** Go 1.26 with Gin (Search API); Python with FastAPI (Gen AI service, ingestion).
+* **Databases:** Cloud Spanner (GoogleSQL, full-text `SEARCH`/`SCORE`, `SEARCH_NGRAMS`, vector `COSINE_DISTANCE`, interleaved tables); BigQuery; Firestore.
+* **AI/ML (Vertex AI, location `global`, Google Gen AI SDK):** `gemini-embedding-2` (1024-d embeddings), `gemini-3.8-flash` (text/flash, intent fallback), `gemini-4-pro` (pro reasoning), `gemini-3.1-flash-image` (images); in-process Go LTR model; BigQuery ML for LTR training.
+* **Infrastructure:** Cloud Run, Cloud Build, Artifact Registry, Terraform (`src/iac`), Docker.
 
 ## Repository Structure
 
 ```
-├── docs/                            # Project documentation
-│   ├── contributing.md              # Contribution guidelines
-│   └── USAGE.md                     # Detailed usage instructions
+├── README.md                          # This file
+├── PRODUCT.md                         # Product requirements (Waves 1–6)
+├── DESIGN.md                          # Architecture, SQL design, scoring, API reference, configuration
+├── DEPLOYMENT.md                      # Deployment guide, migrations, release log
+├── Dockerfile                         # Search API container (multi-stage Go build)
+├── LICENSE                            # Apache 2.0
+├── docs/
+│   └── USAGE.md, contributing.md      # Usage and contribution guides
 ├── src/
-│   ├── analytics/                   # Analytics components
-│   ├── application/                 # Frontend application
-│   │   ├── ui/                      # React-based user interface
-│   │   │   ├── src/                 # UI source code
-│   │   │   │   ├── components/      # React components
-│   │   │   │   └── services/        # Frontend services
-│   │   │   └── public/              # Static assets
-│   ├── iac/                         # Infrastructure as Code (Terraform)
-│   │   ├── modules/                 # Terraform modules
-│   │   │   ├── gen_ai/              # GenAI service infrastructure
-│   │   │   ├── ingestion/           # Ingestion pipeline infrastructure
-│   │   │   ├── search_api/          # Search API infrastructure
-│   │   │   └── spanner/             # Spanner database infrastructure
-│   │   └── main.tf                  # Main Terraform configuration
-│   │   └── variables.tf             # Variables Terraform configuration
-│   ├── psearch/                     # Backend services
-│   │   ├── gen_ai/                  # GenAI service
-│   │   │   └── services/            # AI service implementations
-│   │   ├── ingestion/               # Data ingestion pipeline
-│   │   │   └── services/            # Ingestion service implementations
-│   │   └── serving/                 # Go-based search API
-│   │       ├── cmd/                 # Entry points
-│   │       └── internal/            # Internal implementation
-│   └── tooling/                     # Development and operational tools
-├── .gitignore                       # Git ignore file
-├── LICENSE                          # Apache 2.0 License file
-└── README.md                        # This file
+│   ├── application/ui/                # React UI (src/components, src/services)
+│   ├── iac/
+│   │   ├── main.tf, variables.tf      # Terraform root
+│   │   ├── modules/                   # iam, spanner, ingestion_spanner, search_api, ui, gen_ai, ingestion_source
+│   │   ├── migrations/                # Spanner migrations 011–022 (DDL + seed DML)
+│   │   └── bigquery_scripts/          # Embedding model, Spanner export, autocomplete export, LTR training
+│   └── psearch/
+│       ├── serving/                   # Go Search API
+│       │   ├── cmd/                   # server, sqlcheck, backfill-embeddings
+│       │   └── internal/              # api (routes, handlers, storefront), config, models, services
+│       ├── gen_ai/                    # Python Gen AI service
+│       └── ingestion_source/          # Source ingestion service
+└── tooling/
+    ├── enrichment/                    # Batch image/description enrichment
+    └── loadtest/                      # Load-test tooling
 ```
 
-## Hybrid Search Implementation
+## Hybrid Search & Multi-Stage Ranking Implementation
 
-PSearch's core search functionality leverages Spanner's ability to store and query both structured data and vector embeddings in a single database. The hybrid search combines:
+PSearch runs retrieval, fusion and most ranking in **one Spanner statement**, then refines in Go. Full details and formulas: [DESIGN.md](DESIGN.md).
 
-1. **Vector Similarity Search:** Using APPROX_COSINE_DISTANCE with embeddings generated by Vertex AI
-2. **Full-Text Search:** Using Spanner's native text search capabilities
-3. **Fusion Algorithm:** Combining results using Reciprocal Rank Fusion (RRF)
+1. **Vector similarity** — the query embedding (`gemini-embedding-2`, `RETRIEVAL_QUERY`, 1024-d, cached) is compared with `COSINE_DISTANCE` against `embedding_v2` (or the 768-d `embedding` in `v1`). Exact KNN is used at the current catalog size; a ScaNN index with `APPROX_COSINE_DISTANCE` is a scaling follow-up.
+2. **Full-text search** — `SEARCH()` / `SCORE()` over title and description tokenlists (accent-folded with `TEXT_FOLDING=true`), with synonym expansion at reduced weight and exact matches ordered first.
+3. **Reciprocal Rank Fusion** — `rrf = α · 1/(60 + rank_vector) + (1 − α) · 1/(60 + rank_text)`; `final_score = rrf · rule_multiplier + boost`, with pins first, buries last and unavailable products always last.
+4. **Conversational query understanding** — a deterministic parser extracts price ranges, brands and categories (pt-BR/en/es) before retrieval; Gemini (`gemini-3.8-flash`) is an optional fallback with a two-tier cache.
+5. **Two-stage learning to rank** — Spanner returns the top 100 candidates; an in-memory Go model scores 12 normalized features (rrf, vector, text, 8 business signals, delivery SLA) in microseconds (`ltr=true`).
+6. **Session centroid personalization** — the weighted, recency-decayed mean of the session's product vectors boosts similar products: `session_boost = w · max(0, cos(centroid, product))`.
+7. **Zero-results recovery** — when the text leg finds nothing, an n-gram spell checker (`SEARCH_NGRAMS` over the autocomplete index plus catalog vocabulary) suggests and applies corrections; otherwise the query is relaxed from AND to OR.
+8. **Interleaved B2B pricing & regional CEP SLA** — split-local lookups into `product_prices` resolve the buyer's effective price for results, filters, facets and price sorting; `regional_inventory` restricts results to products deliverable to the buyer's CEP within the requested SLA and attaches the fastest promise.
+9. **Catalog browse** — an empty or `*` query lists the catalog (with all filters) instead of running retrieval; the storefront uses it on load and for "Show All Catalog".
 
-This approach provides several advantages:
-- More relevant results by combining semantic meaning with keyword matching
-- Simplified architecture by using a single datastore
-- Lower latency by avoiding synchronization between separate databases
-- Scalability through Spanner's distributed architecture
+## Product Evaluation Methodology (5-Layer Pyramid)
+
+Search quality is governed by a 5-layer evaluation pyramid of **76 scenarios**; **100 % must pass** before a release is declared production-ready.
+
+| Layer | Focus | Scenarios |
+|---|---|---|
+| L1 | Trajectory & state sequence | 12 |
+| L2 | Policy & business guardrails | 15 |
+| L3 | Adversarial & red-team robustness | 16 |
+| L4 | Multi-mode routing & engine parity | 28 |
+| L5 | Live Vertex AI & service telemetry | 5 |
+
+Every rollout additionally passes `go vet`, `go test -race`, the UI build, an independent review, and `cmd/sqlcheck` against the real database.
 
 ## Setup and Deployment
 
 ### Prerequisites
 
-* Google Cloud SDK (`gcloud`) installed and authenticated
-* Terraform installed
-* Docker installed
-* Go 1.21+ installed (for Serving API)
-* Python 3.9+ installed (for other services)
-* Node.js and npm/yarn installed (for UI development/deployment)
-* A Google Cloud Project with billing enabled and required APIs enabled (Spanner, Cloud Run, Cloud Build, Vertex AI, etc.)
+* Google Cloud SDK (`gcloud`) installed and authenticated.
+* Terraform, Docker, Go 1.26+, Python 3.11+, Node.js 20+ with npm.
+* A Google Cloud project with billing and the Spanner, Cloud Run, Cloud Build, Artifact Registry, Vertex AI, BigQuery and IAM APIs enabled.
 
 ### Clone Repository
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/GoogleCloudPlatform/psearch.git
 cd psearch
 ```
 
 ### Configure Infrastructure
 
-1. Navigate to the IaC directory:
-   ```bash
-   cd src/iac
-   ```
-
-2. Create a `terraform.tfvars` file (or set environment variables):
-   ```hcl
-   project_id     = "your-gcp-project-id"
-   region         = "your-gcp-region"        # e.g., "us-central1"
-   project_number = "your-gcp-project-number"
-   # Other variables as needed (see variables.tf files in modules)
-   # Ensure Spanner instance meets minimum PU requirements for vector search (>=1000)
-   ```
-
-   *Note:* You can find your project number using:
-   ```bash
-   gcloud projects describe your-gcp-project-id --format='value(projectNumber)'
-   ```
-
-3. The Spanner schema (`src/iac/modules/spanner/schema.sql`) defines the necessary tables, vector columns, and indexes for hybrid search.
+1. Go to the Terraform root: `cd src/iac`.
+2. Provide the Terraform variables — at least `project_id`, `project_number` and `region` — via a `terraform.tfvars` file or `-var` flags (see `src/iac/variables.tf`).
+3. The Spanner module (`src/iac/modules/spanner`) defines the base schema; the instance requires **at least 1000 processing units** (enforced by a validation rule).
 
 ### Provision Infrastructure
 
-1. Initialize Terraform:
-   ```bash
-   terraform init
-   ```
+```bash
+terraform init
+terraform apply
+```
 
-2. Apply the Terraform configuration:
-   ```bash
-   terraform apply
-   ```
-   Review the plan and type `yes` to confirm. This process may take several minutes.
+Then apply the numbered schema migrations in order (`src/iac/migrations/011` … `022`) as described in [DEPLOYMENT.md §3](DEPLOYMENT.md#3-spanner-schema-migrations).
 
 ### Deploy Application Services
 
-The `terraform apply` command provisions infrastructure and triggers Cloud Build pipelines defined in the respective service directories:
-* `src/psearch/serving/cloudbuild.yaml`
-* `src/psearch/ingestion/cloudbuild.yaml`
-* `src/psearch/gen_ai/cloudbuild.yaml`
-* `src/application/ui/cloudbuild.yaml`
-
-These build the Docker images and deploy them to Cloud Run. Monitor build progress in the Google Cloud Console under Cloud Build.
+Each service has a Cloud Build pipeline: `src/psearch/serving/cloudbuild.yaml`, `src/psearch/gen_ai/cloudbuild.yaml`, `src/psearch/ingestion_source/cloudbuild.yaml`, `src/application/ui/cloudbuild.yaml`. The Search API runs as a dedicated runtime service account with `roles/aiplatform.user` and `roles/spanner.databaseUser`. Production settings (`ACTIVE_EMBEDDING_VERSION=v2`, `GENAI_LOCATION=global`, `TEXT_FOLDING=true`, …) and the release procedure (clean `git archive`, `cmd/sqlcheck`, `update-traffic --to-latest`) are documented in [DEPLOYMENT.md](DEPLOYMENT.md).
 
 ### Local Development
 
-For local development:
-
-1. **UI Development:**
-   ```bash
-   cd src/application/ui
-   npm install
-   npm start
-   ```
-   This will start a development server on http://localhost:3000.
-
-2. **Go API Development:**
+1. **Search API (no GCP required):**
    ```bash
    cd src/psearch/serving
-   go mod download
-   go run cmd/server/main.go
+   USE_MEMORY_STORE=true go run ./cmd/server     # http://localhost:8080 (storefront at /)
+   go vet ./... && go test -race ./...
    ```
-   This will start the Go API server on http://localhost:8080.
-
-3. **GenAI Services Development:**
+2. **React UI:**
+   ```bash
+   cd src/application/ui
+   npm install --legacy-peer-deps
+   REACT_APP_API_URL=http://localhost:8080 npm start   # http://localhost:3000
+   ```
+3. **Gen AI service:**
    ```bash
    cd src/psearch/gen_ai
    python -m pip install -r requirements.txt
    python main.py
    ```
-   This will start the GenAI services on http://localhost:8081.
+
+Against real Spanner and Vertex AI, set `PROJECT_ID`, `SPANNER_INSTANCE_ID`, `SPANNER_DATABASE_ID`, `ACTIVE_EMBEDDING_VERSION=v2`, `GENAI_LOCATION=global` and Application Default Credentials. All variables: [DESIGN.md §16](DESIGN.md#16-configuration-environment).
 
 ### Google Cloud Costs
 
-When deploying this project, consider the [cost estimation](https://cloud.google.com/products/calculator?e=0&hl=en&dl=CjhDaVJsTkdFME5XUTRZeTAzWXpaa0xUUmxZakV0WVdJeU9DMDBPV015TmpVMU9HRTRaak1RQVE9PRASGiQ3N0M1REY3MS1FOTM1LTRBQTgtOThFMC02MzIzQzQzMTE2NkU) for Google Cloud Products.
+Estimated with the [Google Cloud pricing calculator](https://cloud.google.com/products/calculator) for **500k SKUs** and **70k queries/day**:
 
-This estimation supports the following volume:
-* 500k SKUs for hybrid search
-* 70k queries/day
-
-| Service | GCP Product | Cost |
-|-----------|--------|-------|
+| Service | GCP Product | Cost (monthly) |
+|---|---|---|
 | Catalog | Cloud Spanner | $987.90 |
 | Search API | Cloud Run | $115.63 |
 | UI | Cloud Run | $115.63 |
-| GenAI API | Cloud Run | $115.63 |
-| Embeddings - Search API | Vertex AI | $10.65 |
-| Embeddings - Ingestion | Vertex AI | $121.67 |
-| **TOTAL** | - | **$1,491.06** |
+| Gen AI API | Cloud Run | $115.63 |
+| Embeddings — Search API | Vertex AI | $10.65 |
+| Embeddings — Ingestion | Vertex AI | $121.67 |
+| **Total** | — | **$1,491.06** |
 
-⚠️ **Disclaimer:** This estimation does not include any Gemini-related costs. You will need to calculate those separately for your deployment based on your usage/volume.
+⚠️ **Disclaimer:** this estimate excludes Gemini text/pro model usage (query understanding fallback, Gen AI service) and BigQuery; calculate those for your own volume.
 
 ## Data Ingestion
 
-The ingestion process uses a Cloud Run Job (`src/psearch/ingestion/`) to read product data, generate embeddings, and load into Spanner.
-
-1. **Prepare Source Data:**
-   * Default source is a BigQuery table
-   * Schema should align with the Spanner table defined in `src/iac/modules/spanner/schema.sql`
-   * Key fields include `id`, `title`, `description`, `images`, `categories`, `brands`, etc.
-   * Work is in progress to support multiple data sources (see `TODO.md`)
-
-2. **Execute the Ingestion Job:**
-   * Using Google Cloud Console:
-     1. Navigate to Cloud Run in the Google Cloud Console
-     2. Select the "Jobs" tab
-     3. Find the job named `product-ingestion`
-     4. Click "Execute" to start the job run
-   * Using `gcloud` command line:
-     ```bash
-     gcloud run jobs execute product-ingestion --region your-gcp-region --project your-gcp-project-id --wait
-     ```
+1. **BigQuery → Spanner (reverse ETL):** `src/iac/bigquery_scripts/create_embedding_model.sql` registers the `gemini-embedding-2` remote model; `transform_embed_export_to_spanner.sql` transforms products, generates 1024-d `RETRIEVAL_DOCUMENT` embeddings with `ML.GENERATE_EMBEDDING` and exports them to Spanner (`embedding_v2`).
+2. **v2 embedding backfill:** for rows already in Spanner, run
+   ```bash
+   cd src/psearch/serving
+   PROJECT_ID=<PROJECT_ID> GENAI_LOCATION=global EMBEDDING_MODEL_NAME=gemini-embedding-2 \
+     EMBEDDING_DIMENSION=1024 go run ./cmd/backfill-embeddings -dry-run   # then without -dry-run
+   ```
+3. **Analytics exports:** `autocomplete_export_to_spanner.sql` (top queries → `autocomplete_suggestions`) and `ltr_train.sql` (BigQuery ML LTR weights → `LTR_MODEL_JSON`) run once query/click logs exist in `psearch_dataset`.
 
 ## API Usage
 
-### Search API
+```bash
+BASE=<SERVICE_URL>   # or http://localhost:8080
+```
 
-The Go-based Serving API provides the main search functionality:
+**Search** (`GET` or `POST /api/search`; every parameter is documented in [DESIGN.md §15](DESIGN.md#15-api-reference)):
 
-1. **Find API URL:**
-   ```bash
-   cd src/iac
-   terraform output -raw search_api_service_url
-   ```
+```bash
+# Hybrid search, tuned toward semantics
+curl "$BASE/api/search?q=running+shoes&alpha=0.7&limit=10"
 
-2. **Example Search Request:**
-   ```bash
-   API_URL=$(terraform output -raw search_api_service_url)
-   curl -X POST "${API_URL}/search" \
-        -H "Content-Type: application/json" \
-        -d '{
-              "query": "stylish red running shoes",
-              "limit": 10,
-              "alpha": 0.6
-            }'
-   ```
+# Conversational query (parsing is on by default): clean_query "tenis de corrida", max_price 200
+curl "$BASE/api/search?q=tenis+de+corrida+ate+200+reais"
 
-### GenAI Services
+# B2B contract prices, cheapest first
+curl "$BASE/api/search?q=laptop&price_table_id=b2b-corporate&sort_by=price_asc"
 
-The Python-based GenAI services provide AI enhancement capabilities:
+# Delivery promise for a CEP, next-day only
+curl "$BASE/api/search?q=shoes&cep=01310-100&max_sla_hours=24"
 
-1. **Content Enrichment:**
-   ```bash
-   curl -X POST "${GENAI_URL}/enrich" \
-        -H "Content-Type: application/json" \
-        -d '{
-              "product_id": "123",
-              "product_data": {...},
-              "fields_to_enrich": ["description", "features"]
-            }'
-   ```
+# Two-stage LTR + session personalization
+curl "$BASE/api/search?q=shoes&ltr=true&session_id=sess-demo-0001"
 
-2. **Image Enhancement:**
-   ```bash
-   curl -X POST "${GENAI_URL}/enhance-image" \
-        -H "Content-Type: application/json" \
-        -d '{
-              "product_id": "123",
-              "product_data": {...},
-              "image_base64": "...",
-              "background_prompt": "modern kitchen"
-            }'
-   ```
+# Full catalog browse
+curl "$BASE/api/search?q=*&limit=100"
+
+# POST form
+curl -X POST "$BASE/api/search" -H 'Content-Type: application/json' \
+     -d '{"query":"geladeira","locale":"pt-BR","tenant_id":"default","only_in_stock":true}'
+```
+
+**Sessions, autocomplete, rules, synonyms, system:**
+
+```bash
+curl -X POST "$BASE/api/session/events" -H 'Content-Type: application/json' \
+     -d '{"session_id":"sess-demo-0001","product_id":"prod-003","event_type":"purchase"}'
+curl "$BASE/api/session/events?session_id=sess-demo-0001"
+curl "$BASE/api/autocomplete?q=gel&locale=pt-BR&limit=8"
+curl "$BASE/api/rules?tenant_id=default"
+curl -X POST "$BASE/api/rules" -H "X-Admin-Token: $ADMIN_TOKEN" -H 'Content-Type: application/json' \
+     -d '{"name":"Pin Pegasus","query_pattern":"shoes","pin_product_ids":["prod-003"],"active":true}'
+curl "$BASE/api/synonyms?locale=pt-BR"
+curl "$BASE/api/config/embedding-version"
+curl "$BASE/api/info"
+curl "$BASE/health"
+```
+
+Admin writes (`POST/PUT/DELETE /api/rules`, `POST /api/synonyms`, `POST /api/config/embedding-version`) require `X-Admin-Token` equal to `ADMIN_TOKEN` and are disabled when it is unset.
+
+**Gen AI service** (`src/psearch/gen_ai/main.py`, base URL `$GENAI_URL`):
+
+```bash
+curl "$GENAI_URL/health"
+curl -X POST "$GENAI_URL/conversational-search" -H 'Content-Type: application/json' -d '{"query":"presente para corredor"}'
+curl -X POST "$GENAI_URL/enrichment" -H 'Content-Type: application/json' \
+     -d '{"product_id":"prod-001","product_data":{"title":"UltraBoost Pro Running Shoes"},"fields_to_enrich":["description"]}'
+curl -X POST "$GENAI_URL/marketing" -H 'Content-Type: application/json' \
+     -d '{"product_id":"prod-001","product_data":{"title":"UltraBoost Pro Running Shoes"},"content_type":"social_post","tone":"energetic"}'
+curl -X POST "$GENAI_URL/generate-enhanced-image" -H 'Content-Type: application/json' \
+     -d '{"product_id":"prod-001","product_data":{},"image_base64":"<BASE64>","background_prompt":"city running track at sunrise"}'
+```
+
+Request models (`ConversationalSearchRequest`, `EnrichmentRequest`, `MarketingRequest`, `EnhancedImageRequest`, SQL agent models) are defined in `src/psearch/gen_ai/main.py`.
 
 ## Troubleshooting
 
 ### Common Issues
 
-1. **Spanner Permissions:**
-   * Ensure the service accounts have the necessary permissions for Spanner operations
-   * Check IAM roles in Google Cloud Console
-
-2. **Vector Search Requirements:**
-   * Spanner must have at least 1000 Processing Units for vector search
-   * Verify in the Spanner console that the instance has enough capacity
-
-3. **Embedding Generation:**
-   * If search results are poor, verify that embeddings are being generated correctly
-   * Check logs for embedding generation failures
-
-4. **API Connectivity:**
-   * If UI can't connect to backend services, check CORS configuration
-   * Verify that service URLs are correctly configured in the UI
+1. **Spanner permissions** — the runtime service account needs `roles/spanner.databaseUser` on `psearch-db`; `PermissionDenied` on client metrics export can be silenced with `SPANNER_DISABLE_BUILTIN_METRICS=true`.
+2. **Vector search capacity** — the Spanner instance must have at least 1000 processing units (Terraform validation).
+3. **Embedding generation** — `retrieval_mode=lexical_only_degraded` means the query embedding failed; check that the runtime service account has `roles/aiplatform.user`, that `EMBEDDING_DIMENSION` matches the column (1024 for v2), and that `embedding_v2` is backfilled.
+4. **Vertex AI `global` endpoint** — Gemini 3.x/4 and `gemini-embedding-2` are served from `global` (or the `us`/`eu` multi-regions), not from `us-central1`; keep `GENAI_LOCATION=global` independent of the Cloud Run region.
+5. **`memory_fallback` in responses** — the Spanner query failed (or no client is configured); run `go run ./cmd/sqlcheck` with the production environment to see the SQL error.
+6. **API connectivity from the UI** — set `REACT_APP_API_URL` (the dev proxy in `src/application/ui/src/setupProxy.js` forwards `/search`); for the storefront, open `GET /` on the Search API directly.
+7. **Storefront stuck on "Loading catalog..."** — the inline storefront script failed to parse; `go test ./internal/api` runs `node --check` on it (`TestStorefrontInlineJSParses`).
 
 ## Contributing
 
-Please see [docs/contributing.md](docs/contributing.md) for details on how to contribute to this project.
+See [docs/contributing.md](docs/contributing.md). Changes to the Search API must keep Spanner/memory parity, use bound SQL parameters, add a `cmd/sqlcheck` case for new SQL, and pass `go vet`, `go test -race` and `npm run build`.
 
 ## License
 
-This project is licensed under the Apache License, Version 2.0. See the [LICENSE](LICENSE) file for details.
+This project is licensed under the Apache License 2.0 — see [LICENSE](LICENSE).
 
 ## Disclaimer
 

@@ -59,6 +59,10 @@ const SearchInput = memo(({
     setPriceTableId: controlledSetPriceTableId,
     sortBy: controlledSortBy,
     setSortBy: controlledSetSortBy,
+    color: controlledColor,
+    setColor: controlledSetColor,
+    size: controlledSize,
+    setSize: controlledSetSize,
 }) => {
     const [inputValue, setInputValue] = useState(controlledQuery || '');
 
@@ -78,6 +82,8 @@ const SearchInput = memo(({
     const [internalParseIntent, setInternalParseIntent] = useState(true);
     const [internalPriceTableId, setInternalPriceTableId] = useState('');
     const [internalSortBy, setInternalSortBy] = useState('');
+    const [internalColor, setInternalColor] = useState('');
+    const [internalSize, setInternalSize] = useState('');
     const [cepError, setCepError] = useState('');
     const [suggestions, setSuggestions] = useState([]);
     const [isOpen, setIsOpen] = useState(false);
@@ -106,6 +112,10 @@ const SearchInput = memo(({
     const setPriceTableId = controlledSetPriceTableId || setInternalPriceTableId;
     const sortBy = controlledSortBy !== undefined ? controlledSortBy : internalSortBy;
     const setSortBy = controlledSetSortBy || setInternalSortBy;
+    const color = controlledColor !== undefined ? controlledColor : internalColor;
+    const setColor = controlledSetColor || setInternalColor;
+    const size = controlledSize !== undefined ? controlledSize : internalSize;
+    const setSize = controlledSetSize || setInternalSize;
 
     // Local slider value for responsive dragging
     const [localAlpha, setLocalAlpha] = useState(alpha);
@@ -177,6 +187,8 @@ const SearchInput = memo(({
             parseIntent,
             priceTableId,
             sortBy,
+            color,
+            size,
         });
     };
 
@@ -214,6 +226,8 @@ const SearchInput = memo(({
             parseIntent,
             priceTableId,
             sortBy,
+            color,
+            size,
         });
     };
 
@@ -424,6 +438,45 @@ const SearchInput = memo(({
                         <MenuItem value="">Relevância</MenuItem>
                         <MenuItem value="price_asc">Menor preço</MenuItem>
                         <MenuItem value="price_desc">Maior preço</MenuItem>
+                    </Select>
+                </FormControl>
+
+                {/* Cor Selector */}
+                <FormControl size="small" sx={{ minWidth: 130 }}>
+                    <InputLabel id="color-select-label">Cor</InputLabel>
+                    <Select
+                        labelId="color-select-label"
+                        id="color-select"
+                        value={color}
+                        label="Cor"
+                        onChange={(e) => setColor(e.target.value)}
+                    >
+                        <MenuItem value="">Todas</MenuItem>
+                        <MenuItem value="preto">Preto</MenuItem>
+                        <MenuItem value="branco">Branco</MenuItem>
+                        <MenuItem value="azul">Azul</MenuItem>
+                        <MenuItem value="prata">Prata</MenuItem>
+                        <MenuItem value="grafite">Grafite</MenuItem>
+                    </Select>
+                </FormControl>
+
+                {/* Tamanho Selector */}
+                <FormControl size="small" sx={{ minWidth: 130 }}>
+                    <InputLabel id="size-select-label">Tamanho</InputLabel>
+                    <Select
+                        labelId="size-select-label"
+                        id="size-select"
+                        value={size}
+                        label="Tamanho"
+                        onChange={(e) => setSize(e.target.value)}
+                    >
+                        <MenuItem value="">Todos</MenuItem>
+                        <MenuItem value="38">38</MenuItem>
+                        <MenuItem value="39">39</MenuItem>
+                        <MenuItem value="40">40</MenuItem>
+                        <MenuItem value="41">41</MenuItem>
+                        <MenuItem value="42">42</MenuItem>
+                        <MenuItem value="43">43</MenuItem>
                     </Select>
                 </FormControl>
 
