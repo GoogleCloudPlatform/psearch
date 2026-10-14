@@ -206,6 +206,7 @@ type SearchOutcome struct {
 	CacheHit      bool     // query embedding served from the embedding cache (v2 only)
 	ExpandedTerms []string // synonym phrases added to the text leg
 	AppliedRules  []string // merchandising rule_ids applied
+	Pins, Buries  []string // merchandising pins/buries (kept by the LTR re-ranker)
 }
 
 // HybridSearch executes hybrid vector + full-text RRF search against Cloud Spanner (with deterministic fallback).
@@ -241,7 +242,7 @@ func (s *SpannerService) HybridSearchDetailed(ctx context.Context, query string,
 			// Degraded v2: return Spanner's lexical results as-is (even if empty).
 			// Falling back to the in-memory engine here would mask the outage with
 			// deterministic 768-d vector scores.
-			return SearchOutcome{Results: res, RetrievalMode: RetrievalLexicalOnly, ExpandedTerms: expansion.Terms, AppliedRules: ruleSet.Applied}, nil
+			return SearchOutcome{Results: res, RetrievalMode: RetrievalLexicalOnly, ExpandedTerms: expansion.Terms, AppliedRules: ruleSet.Applied, Pins: ruleSet.Pins, Buries: ruleSet.Buries}, nil
 		default:
 			// A successful Spanner query is authoritative even when it returns no rows
 			// (e.g. tenant/category filters exclude everything). Falling back to the
@@ -250,11 +251,11 @@ func (s *SpannerService) HybridSearchDetailed(ctx context.Context, query string,
 			if plan.column == vectorColumnV2 {
 				mode = RetrievalHybridV2
 			}
-			return SearchOutcome{Results: res, RetrievalMode: mode, CacheHit: plan.cacheHit, ExpandedTerms: expansion.Terms, AppliedRules: ruleSet.Applied}, nil
+			return SearchOutcome{Results: res, RetrievalMode: mode, CacheHit: plan.cacheHit, ExpandedTerms: expansion.Terms, AppliedRules: ruleSet.Applied, Pins: ruleSet.Pins, Buries: ruleSet.Buries}, nil
 		}
 	}
 
-	return SearchOutcome{Results: s.memoryHybridSearchExpanded(query, limit, minScore, alpha, filters, expansion, ruleSet), RetrievalMode: RetrievalMemory, ExpandedTerms: expansion.Terms, AppliedRules: ruleSet.Applied}, nil
+	return SearchOutcome{Results: s.memoryHybridSearchExpanded(query, limit, minScore, alpha, filters, expansion, ruleSet), RetrievalMode: RetrievalMemory, ExpandedTerms: expansion.Terms, AppliedRules: ruleSet.Applied, Pins: ruleSet.Pins, Buries: ruleSet.Buries}, nil
 }
 
 // vectorPlan describes how the vector leg of the hybrid query is executed.

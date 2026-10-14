@@ -68,6 +68,10 @@ function ProductSearch({
     const [onlyInStock, setOnlyInStock] = useState(false);
     const [cep, setCep] = useState('');
     const [maxSla24h, setMaxSla24h] = useState(false);
+    const [ltr, setLtr] = useState(false);
+    const [effectiveLtr, setEffectiveLtr] = useState(false);
+    const [ltrModel, setLtrModel] = useState(null);
+    const [ltrLatencyUs, setLtrLatencyUs] = useState(null);
     const [internalTenantId, setInternalTenantId] = useState('default');
     const [internalLocale, setInternalLocale] = useState('');
     const tenantId = propTenantId !== undefined ? propTenantId : internalTenantId;
@@ -507,6 +511,9 @@ function ProductSearch({
             if (maxSla24h) {
                 payload.max_sla_hours = 24;
             }
+            if (ltr) {
+                payload.ltr = true;
+            }
 
             const response = await axios.post(`${API_URL}/search`, payload);
 
@@ -548,6 +555,21 @@ function ProductSearch({
                 } else {
                     setFacetsLatencyMs(null);
                 }
+                if (response.data.ltr !== undefined) {
+                    setEffectiveLtr(Boolean(response.data.ltr));
+                } else {
+                    setEffectiveLtr(false);
+                }
+                if (response.data.ltr_model !== undefined) {
+                    setLtrModel(response.data.ltr_model);
+                } else {
+                    setLtrModel(null);
+                }
+                if (response.data.ltr_latency_us !== undefined) {
+                    setLtrLatencyUs(response.data.ltr_latency_us);
+                } else {
+                    setLtrLatencyUs(null);
+                }
             }
 
             // Simple processing - just map products without modifying anything
@@ -587,7 +609,7 @@ function ProductSearch({
         } finally {
             setLoading(false);
         }
-    }, [activeSearchQuery, alpha, channel, onlyInStock, selectedCategory, selectedBrand, tenantId, locale, cep, maxSla24h]);
+    }, [activeSearchQuery, alpha, channel, onlyInStock, selectedCategory, selectedBrand, tenantId, locale, cep, maxSla24h, ltr]);
 
     // Handler for filter changes from the Filters component - now works with dynamic filter IDs
     const handleFilterChange = useCallback((filterId, value, isChecked) => {
@@ -737,6 +759,9 @@ function ProductSearch({
         }
         if (options.maxSla24h !== undefined) {
             setMaxSla24h(options.maxSla24h);
+        }
+        if (options.ltr !== undefined) {
+            setLtr(options.ltr);
         }
         // Update active search query which triggers API call
         setActiveSearchQuery(typeof searchText === 'string' ? searchText : searchText?.query || '');
@@ -950,6 +975,26 @@ function ProductSearch({
                                                             sx={{ fontWeight: 600, height: 24, fontSize: '0.75rem' }}
                                                         />
                                                     )}
+                                                    {(() => {
+                                                        const s = product.score || {};
+                                                        if (s.stage1_rank !== undefined && s.stage2_rank !== undefined) {
+                                                            const diff = s.stage1_rank - s.stage2_rank;
+                                                            let rankLabel = `${s.stage1_rank} → ${s.stage2_rank}`;
+                                                            if (diff > 0) rankLabel += ` (↑${diff})`;
+                                                            else if (diff < 0) rankLabel += ` (↓${Math.abs(diff)})`;
+                                                            const color = diff > 0 ? 'success' : diff < 0 ? 'warning' : 'default';
+                                                            return (
+                                                                <Chip
+                                                                    label={rankLabel}
+                                                                    size="small"
+                                                                    color={color}
+                                                                    variant="outlined"
+                                                                    sx={{ fontWeight: 600, height: 24, fontSize: '0.75rem' }}
+                                                                />
+                                                            );
+                                                        }
+                                                        return null;
+                                                    })()}
                                                 </Box>
                                             );
                                         })()}
@@ -1061,6 +1106,8 @@ function ProductSearch({
                         setCep={setCep}
                         maxSla24h={maxSla24h}
                         setMaxSla24h={setMaxSla24h}
+                        ltr={ltr}
+                        setLtr={setLtr}
                     />
 
                     {/* Display search result count and search metadata */}
@@ -1088,6 +1135,7 @@ function ProductSearch({
                                 {effectiveLocale && ` • locale: ${effectiveLocale}`}
                                 {facetsLatencyMs !== null && ` • facets: ${Number(facetsLatencyMs).toFixed(1)}ms`}
                                 {appliedRules && appliedRules.length > 0 && ` • applied_rules: ${appliedRules.join(', ')}`}
+                                {effectiveLtr && ltrModel && ` • ltr: ${ltrModel} (${ltrLatencyUs || 0}µs)`}
                             </Typography>
                             <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap' }}>
                                 {effectiveAlpha !== null && (
@@ -1107,6 +1155,12 @@ function ProductSearch({
                                 )}
                                 {appliedRules && appliedRules.length > 0 && (
                                     <Chip size="small" color="secondary" variant="outlined" label={`applied_rules: ${appliedRules.join(', ')}`} />
+                                )}
+                                {effectiveLtr && ltrModel && (
+                                    <Chip size="small" color="secondary" variant="outlined" label={`ltr_model: ${ltrModel}`} />
+                                )}
+                                {effectiveLtr && ltrLatencyUs !== null && ltrLatencyUs !== undefined && (
+                                    <Chip size="small" variant="outlined" label={`ltr_latency: ${ltrLatencyUs}µs`} />
                                 )}
                             </Box>
                         </Box>
