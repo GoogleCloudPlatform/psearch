@@ -17,6 +17,8 @@
 Marketing Service - Generates marketing content for products
 """
 
+import os
+
 from google import genai
 from google.genai import types
 import logging
@@ -38,7 +40,7 @@ class MarketingService:
             project=project_id,
             location=location,
         )
-        self.model = "gemini-2.0-flash-001"
+        self.model = os.environ.get("GEMINI_TEXT_MODEL", "gemini-3.5-flash")
 
     def generate_content(
         self,

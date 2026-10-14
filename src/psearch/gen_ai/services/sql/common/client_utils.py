@@ -32,15 +32,15 @@ class GenAIClient:
 
         Args:
             project_id: The Google Cloud Project ID.
-            location: The GCP region (e.g., us-central1).
-            model_name: Optional. The Gemini model name. Defaults to GEMINI_MODEL env var or "gemini-2.5-pro-preview-05-06".
+            location: Vertex AI location for Gen AI calls (Gemini 3.x is served from "global").
+            model_name: Optional. The Gemini model name. Defaults to GEMINI_MODEL env var or "gemini-3.5-flash".
         """
         self.project_id = project_id
         self.location = location
         
         try:
             self.client = genai.Client(
-                vertexai=True, # Assuming Vertex AI based on original code
+                vertexai=True,
                 project=project_id,
                 location=location,
             )
@@ -49,7 +49,7 @@ class GenAIClient:
             logger.error(f"Failed to initialize GenAI client for Vertex AI: {str(e)}")
             raise
             
-        self.model_name = model_name or os.environ.get("GEMINI_MODEL", "gemini-2.5-pro-preview-05-06") # Updated default
+        self.model_name = model_name or os.environ.get("GEMINI_MODEL", "gemini-3.5-flash") # Updated default
         logger.info(f"Using Gemini model: {self.model_name}")
 
 

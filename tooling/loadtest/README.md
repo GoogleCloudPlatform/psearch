@@ -33,7 +33,7 @@ The load testing setup simulates users performing various operations on the PSea
 
    Or set environment variables directly in your shell:
    ```bash
-   export API_HOST=https://product-search-api-739124572941.us-central1.run.app
+   export API_HOST=https://product-search-api-1234567890.us-central1.run.app
    export MIN_WAIT_TIME=1000
    export MAX_WAIT_TIME=5000
    ```
@@ -68,7 +68,7 @@ Once Locust is running, open the web interface at http://localhost:8089 to:
 
 For CI/CD pipelines or automated testing, run Locust in headless mode:
 ```bash
-locust -f locustfile.py --headless -u 100 -r 10 --run-time 5m --host=https://product-search-api-739124572941.us-central1.run.app
+locust -f locustfile.py --headless -u 100 -r 10 --run-time 5m --host=https://product-search-api-1234567890.us-central1.run.app
 ```
 
 Where:

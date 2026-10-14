@@ -17,6 +17,8 @@
 Imagen Service - Generates product images using Imagen API
 """
 
+import os
+
 from google import genai
 from google.genai import types
 import logging
@@ -35,7 +37,7 @@ class ImageGenerationService:
             project=project_id,
             location=location,
         )
-        self.model = "gemini-2.0-flash-exp"
+        self.model = os.environ.get("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image")
 
     def generate_image(
         self,
