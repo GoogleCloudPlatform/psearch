@@ -24,6 +24,9 @@ type Controller struct {
 	rules        *services.RuleService
 	autocomplete *services.AutocompleteService
 	ltrModel     *services.LTRModel
+	intent       *services.QueryUnderstandingService
+	spell        *services.SpellCheckService
+	session      *services.SessionService
 }
 
 func NewController(cfg *config.Config) (*Controller, error) {
@@ -62,6 +65,32 @@ func NewController(cfg *config.Config) (*Controller, error) {
 	}
 	rules := services.NewRuleService(ruleStore, 30*time.Second)
 	spannerSvc.SetRules(rules)
+	var intentLLM services.IntentLLM
+	var intentStore services.IntentStore
+	if cfg.IntentLLMFallback {
+		if llm, err := services.NewGeminiIntentLLM(ctx, cfg, cfg.IntentLLMModel); err != nil {
+			log.Printf("WARN: intent LLM fallback disabled: %v", err)
+		} else {
+			intentLLM = llm
+		}
+		if client := spannerSvc.Client(); client != nil {
+			intentStore = services.SpannerIntentStore{Client: client}
+		}
+	}
+	vocabCtx, vocabCancel := context.WithTimeout(ctx, 5*time.Second)
+	vocab := spannerSvc.CatalogVocabulary(vocabCtx)
+	vocabCancel()
+	intent := services.NewQueryUnderstandingService(vocab, intentLLM, intentStore)
+	spell := services.NewSpellCheckService(spannerSvc.Client())
+	spell.AddVocabulary(vocab, services.DefaultSuggestions(services.DefaultSeedProducts()))
+	for _, syn := range services.DefaultSynonyms() {
+		spell.AddVocabulary([]models.SearchResult{{Title: syn.Term + " " + strings.Join(syn.Synonyms, " ")}}, nil)
+	}
+	var sessionStore services.SessionStore = services.NewMemorySessionStore()
+	if client := spannerSvc.Client(); client != nil {
+		sessionStore = services.SpannerSessionStore{Client: client}
+	}
+	session := services.NewSessionService(sessionStore, spannerSvc, cfg.SessionBoostWeight)
 	ltrModel := services.DefaultLTRModel()
 	if cfg.LTRModelJSON != "" {
 		if m, err := services.ParseLTRModel(cfg.LTRModelJSON); err != nil {
@@ -80,6 +109,9 @@ func NewController(cfg *config.Config) (*Controller, error) {
 		rules:        rules,
 		autocomplete: autocomplete,
 		ltrModel:     ltrModel,
+		intent:       intent,
+		spell:        spell,
+		session:      session,
 	}, nil
 }
 
@@ -103,6 +135,10 @@ func (c *Controller) Info(ctx *gin.Context) {
 		"active_embedding_version": c.config.ActiveVersion(),
 		"embedding_dimension":      c.config.ActiveDimension(),
 		"vector_dimensions":        c.config.ActiveDimension(),
+		"embedding_model":          c.config.EmbeddingModelName,
+		"text_model":               c.config.IntentLLMModel,
+		"pro_model":                c.config.ProLLMModel,
+		"genai_location":           c.config.GenAILocation,
 		"embedding_cache":          c.cacheStats(),
 		"default_alpha":            c.config.DefaultAlpha,
 		"orchestrator":             "lead",
@@ -133,6 +169,22 @@ func (c *Controller) Search(ctx *gin.Context) {
 		req.Locale = ctx.Query("locale")
 		req.TenantID = ctx.Query("tenant_id")
 		req.LTR = ctx.Query("ltr") == "true" || ctx.Query("ltr") == "1"
+		if v := ctx.Query("parse_intent"); v != "" {
+			b := v == "true" || v == "1"
+			req.ParseIntent = &b
+		}
+		req.PriceTable = ctx.Query("price_table_id")
+		req.SortBy = ctx.Query("sort_by")
+		req.SessionID = ctx.Query("session_id")
+		if v := ctx.Query("session_product_ids"); v != "" {
+			req.SessionProductIDs = strings.Split(v, ",")
+		}
+		if v, err := strconv.ParseFloat(ctx.Query("min_price"), 64); err == nil {
+			req.MinPrice = v
+		}
+		if v, err := strconv.ParseFloat(ctx.Query("max_price"), 64); err == nil {
+			req.MaxPrice = v
+		}
 		if v := ctx.Query("max_sla_hours"); v != "" {
 			if n, err := strconv.ParseInt(v, 10, 64); err == nil {
 				req.MaxSLAHours = n
@@ -177,7 +229,20 @@ func (c *Controller) Search(ctx *gin.Context) {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "max_sla_hours must be between 0 and 1440"})
 		return
 	}
+	if req.MinPrice < 0 || req.MaxPrice < 0 || (req.MaxPrice > 0 && req.MinPrice > req.MaxPrice) {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "min_price/max_price must be >= 0 and min_price <= max_price"})
+		return
+	}
+	req.PriceTable, req.SortBy = strings.TrimSpace(req.PriceTable), strings.TrimSpace(req.SortBy)
+	if err := services.ValidatePricing(req.PriceTable, req.SortBy); err != nil {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 	filters := models.SearchFilters{
+		PriceTable:  req.PriceTable,
+		SortBy:      req.SortBy,
+		MinPrice:    req.MinPrice,
+		MaxPrice:    req.MaxPrice,
 		Zip5:        zip5,
 		MaxSLAHours: req.MaxSLAHours,
 		OnlyInStock: req.OnlyInStock,
@@ -187,6 +252,39 @@ func (c *Controller) Search(ctx *gin.Context) {
 		TenantID:    req.TenantID,
 		Locale:      req.Locale,
 	}
+	// ADR-007 (Issue #19): decompose natural-language queries into a clean query
+	// plus structured filters; explicit request filters win.
+	var parsed *models.ParsedQuery
+	searchQuery := req.Query
+	// Enabled by default; parse_intent=false opts out. When nothing is extracted the
+	// query is left untouched and parsed_query is omitted (unless explicitly requested).
+	explicitIntent := req.ParseIntent != nil && *req.ParseIntent
+	if (req.ParseIntent == nil || *req.ParseIntent) && strings.TrimSpace(req.Query) != "" {
+		in, source := c.intent.Understand(ctx.Request.Context(), filters.TenantID, req.Query)
+		if !in.HasFilters() && !explicitIntent {
+			goto intentDone
+		}
+		filters = services.ApplyIntent(filters, in)
+		searchQuery = in.CleanQuery
+		extracted := map[string]interface{}{}
+		if in.MinPrice > 0 {
+			extracted["min_price"] = in.MinPrice
+		}
+		if in.MaxPrice > 0 {
+			extracted["max_price"] = in.MaxPrice
+		}
+		if in.Brand != "" {
+			extracted["brand"] = in.Brand
+		}
+		if in.Category != "" {
+			extracted["category"] = in.Category
+		}
+		if in.Color != "" {
+			extracted["color"] = in.Color
+		}
+		parsed = &models.ParsedQuery{OriginalQuery: req.Query, CleanQuery: in.CleanQuery, ExtractedFilters: extracted, IntentSource: source}
+	}
+intentDone:
 	// Facets are aggregated over a wider candidate set (top facetCandidates) than
 	// the page returned to the client (Issue #5, ADR-003).
 	const facetCandidates = 100
@@ -194,7 +292,34 @@ func (c *Controller) Search(ctx *gin.Context) {
 	if candidateLimit < facetCandidates {
 		candidateLimit = facetCandidates
 	}
-	outcome, err := c.spannerSvc.HybridSearchDetailed(ctx.Request.Context(), req.Query, candidateLimit, minScore, alpha, filters)
+	outcome, err := c.spannerSvc.HybridSearchDetailed(ctx.Request.Context(), searchQuery, candidateLimit, minScore, alpha, filters)
+	// ADR-008 (Issue #21): zero-results recovery when the lexical leg found nothing.
+	var didYouMean string
+	var autoCorrected, relaxed bool
+	if err == nil && strings.TrimSpace(searchQuery) != "" && services.LexicalHits(outcome.Results) == 0 {
+		if corrected, changed := c.spell.Correct(ctx.Request.Context(), filters.TenantID, searchQuery); changed {
+			didYouMean = corrected
+			// The corrected token may be an entity that is only indexed as a structured
+			// column (e.g. brand "samsung"), not in title/description tokens. Re-parse
+			// the corrected query so such entities become filters (ADR-007/008).
+			altQuery, altFilters := corrected, filters
+			entity := false
+			if in := c.intent.Parse(corrected); in.Brand != "" || in.Category != "" {
+				altQuery, altFilters, entity = in.CleanQuery, services.ApplyIntent(filters, in), true
+			}
+			if alt, aerr := c.spannerSvc.HybridSearchDetailed(ctx.Request.Context(), altQuery, candidateLimit, minScore, alpha, altFilters); aerr == nil &&
+				(services.LexicalHits(alt.Results) > 0 || (entity && len(alt.Results) > 0)) {
+				outcome, searchQuery, filters, autoCorrected = alt, altQuery, altFilters, true
+			}
+		}
+		if !autoCorrected && len(strings.Fields(searchQuery)) > 1 {
+			rf := filters
+			rf.RelaxText = true
+			if alt, aerr := c.spannerSvc.HybridSearchDetailed(ctx.Request.Context(), searchQuery, candidateLimit, minScore, alpha, rf); aerr == nil && services.LexicalHits(alt.Results) > 0 {
+				outcome, relaxed = alt, true
+			}
+		}
+	}
 	results := outcome.Results
 	if results == nil {
 		results = []models.SearchResult{} // always serialize as [] (never null)
@@ -211,7 +336,7 @@ func (c *Controller) Search(ctx *gin.Context) {
 		ids = append(ids, r.ID)
 	}
 	facetStart := time.Now()
-	facets, ferr := c.spannerSvc.Facets(ctx.Request.Context(), ids)
+	facets, ferr := c.spannerSvc.Facets(ctx.Request.Context(), ids, filters.PriceTable, filters.TenantID)
 	facetsMs := float64(time.Since(facetStart).Microseconds()) / 1000.0
 	if ferr != nil {
 		log.Printf("WARN: facets unavailable: %v", ferr)
@@ -240,13 +365,35 @@ func (c *Controller) Search(ctx *gin.Context) {
 		}
 	}
 	var ltrRes services.LTRResult
-	if req.LTR && len(results) > 0 {
+	priceSorted := req.SortBy == "price_asc" || req.SortBy == "price_desc"
+	if req.LTR && len(results) > 0 && !priceSorted { // an explicit price sort wins over LTR
 		// ADR-006 stage 2: in-memory re-ranking of the stage-1 top-100 candidates.
 		signals, err := c.spannerSvc.CandidateSignals(ctx.Request.Context(), ids)
 		if err != nil {
 			log.Printf("WARN: ltr signals unavailable (re-ranking on relevance features only): %v", err)
 		}
 		ltrRes = services.Rerank(c.ltrModel, results, signals, outcome.Pins, outcome.Buries)
+	}
+	// ADR-007 (Issue #20): session-aware re-ranking by the session centroid.
+	personalized := false
+	if req.SessionID != "" || len(req.SessionProductIDs) > 0 {
+		var events []services.SessionEvent
+		if req.SessionID != "" && services.ValidSessionID(req.SessionID) {
+			if ev, err := c.session.Recent(ctx.Request.Context(), filters.TenantID, req.SessionID); err != nil {
+				log.Printf("WARN: session events unavailable: %v", err)
+			} else {
+				events = ev
+			}
+		}
+		for i, id := range req.SessionProductIDs {
+			if i >= 20 {
+				break
+			}
+			if id = strings.TrimSpace(id); id != "" {
+				events = append(events, services.SessionEvent{ProductID: id, EventType: "click"})
+			}
+		}
+		personalized = c.session.Personalize(ctx.Request.Context(), filters.TenantID, events, results, outcome.Pins, outcome.Buries, req.SortBy, ltrRes.ModelVersion != "")
 	}
 	if len(results) > limit {
 		results = results[:limit]
@@ -275,6 +422,14 @@ func (c *Controller) Search(ctx *gin.Context) {
 		LTR:              req.LTR && ltrRes.ModelVersion != "",
 		LTRLatencyUS:     ltrRes.LatencyUS,
 		LTRModel:         ltrRes.ModelVersion,
+		ParsedQuery:      parsed,
+		DidYouMean:       didYouMean,
+		AutoCorrected:    autoCorrected,
+		QueryRelaxed:     relaxed,
+		PriceTableID:     req.PriceTable,
+		SortBy:           req.SortBy,
+		SessionID:        req.SessionID,
+		Personalized:     personalized,
 		RetrievalMode:    outcome.RetrievalMode,
 	})
 }
@@ -456,4 +611,42 @@ func (c *Controller) Autocomplete(ctx *gin.Context) {
 		"cached":      cached,
 		"latency_ms":  float64(time.Since(start).Microseconds()) / 1000.0,
 	})
+}
+
+// RecordSessionEvent: POST /api/session/events {session_id, product_id, event_type, tenant_id?} (Issue #20).
+func (c *Controller) RecordSessionEvent(ctx *gin.Context) {
+	var e services.SessionEvent
+	if err := ctx.ShouldBindJSON(&e); err != nil {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if e.TenantID == "" {
+		e.TenantID = tenantParam(ctx)
+	}
+	saved, err := c.session.Record(ctx.Request.Context(), e)
+	if err != nil {
+		if strings.Contains(err.Error(), "must") || strings.Contains(err.Error(), "required") {
+			ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		} else {
+			log.Printf("WARN: record session event: %v", err)
+			ctx.JSON(http.StatusServiceUnavailable, gin.H{"error": "event not recorded"})
+		}
+		return
+	}
+	ctx.JSON(http.StatusCreated, saved)
+}
+
+// ListSessionEvents: GET /api/session/events?session_id=... (newest first, last 20).
+func (c *Controller) ListSessionEvents(ctx *gin.Context) {
+	sid := ctx.Query("session_id")
+	if !services.ValidSessionID(sid) {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "invalid session_id"})
+		return
+	}
+	events, err := c.session.Recent(ctx.Request.Context(), tenantParam(ctx), sid)
+	if err != nil {
+		ctx.JSON(http.StatusServiceUnavailable, gin.H{"error": "session unavailable"})
+		return
+	}
+	ctx.JSON(http.StatusOK, gin.H{"session_id": sid, "events": events, "count": len(events)})
 }

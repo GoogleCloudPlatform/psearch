@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"sync/atomic"
 
 	"github.com/joho/godotenv"
@@ -16,12 +17,16 @@ type Config struct {
 	Region                   string
 	SpannerInstanceID        string
 	SpannerDatabaseID        string
-	GenAILocation            string  // Vertex AI location for Gen AI SDK calls (Gemini 3.x / gemini-embedding-2 => "global")
-	EmbeddingModelName       string  // Gemini embedding model used for the v2 vector column
-	GeminiEmbeddingDimension int     // output_dimensionality requested from the embedding model (ADR-001: 1024)
-	EmbeddingDimension       int     // dimension of the ACTIVE vector column (v1=768 legacy, v2=GeminiEmbeddingDimension)
-	ActiveEmbeddingVersion   string  // initial version from env; use ActiveVersion() at runtime
-	LTRModelJSON             string  // optional learned LTR model (BigQuery ML export); empty = baseline
+	GenAILocation            string // Vertex AI location for Gen AI SDK calls (Gemini 3.x / gemini-embedding-2 => "global")
+	EmbeddingModelName       string // Gemini embedding model used for the v2 vector column
+	GeminiEmbeddingDimension int    // output_dimensionality requested from the embedding model (ADR-001: 1024)
+	EmbeddingDimension       int    // dimension of the ACTIVE vector column (v1=768 legacy, v2=GeminiEmbeddingDimension)
+	ActiveEmbeddingVersion   string // initial version from env; use ActiveVersion() at runtime
+	LTRModelJSON             string // optional learned LTR model (BigQuery ML export); empty = baseline
+	IntentLLMFallback        bool   // ADR-007: Gemini Flash Lite fallback for unparsed conversational queries
+	IntentLLMModel           string // Issue #23: text/intent model ("gemini-3.8-flash")
+	ProLLMModel              string // Issue #23: pro reasoning model ("gemini-4-argon")
+	SessionBoostWeight       float64 // ADR-007 (#20): weight of the session centroid similarity boost
 	BoostWeight              float64 // scale of the 8-signal boost added to RRF (ADR-004); 0 disables
 	TextFolding              bool    // use accent-folded tokenlists (migration 014b) so "tenis" matches "Tênis" (Issue #4)
 	AdminToken               string  // guards POST /api/config/embedding-version (empty = disabled)
@@ -33,13 +38,23 @@ type Config struct {
 	StaticDir                string
 }
 
+// NormalizeModelID normalizes model aliases (e.g. gemini-4-pro / gemini-4.0-pro -> gemini-4-argon).
+func NormalizeModelID(model string) string {
+	switch strings.ToLower(strings.TrimSpace(model)) {
+	case "gemini-4-pro", "gemini-4.0-pro":
+		return "gemini-4-argon"
+	default:
+		return model
+	}
+}
+
 func Load() (*Config, error) {
 	_ = godotenv.Load()
 
 	cfg := &Config{
 		Port:                     8080,
 		Environment:              getEnv("ENVIRONMENT", "production"),
-		ProjectID:                getEnv("PROJECT_ID", "riojucu-sandbox"),
+		ProjectID:                getEnv("PROJECT_ID", getEnv("GCP_SANDBOX_PROJECT", getEnv("CLOUDSDK_CORE_PROJECT", "psearch-sandbox"))),
 		Region:                   getEnv("REGION", "us-central1"),
 		SpannerInstanceID:        getEnv("SPANNER_INSTANCE_ID", "psearch-instance"),
 		SpannerDatabaseID:        getEnv("SPANNER_DATABASE_ID", "psearch-db"),
@@ -50,6 +65,10 @@ func Load() (*Config, error) {
 		AdminToken:               os.Getenv("ADMIN_TOKEN"),
 		TextFolding:              getEnv("TEXT_FOLDING", "false") == "true",
 		BoostWeight:              0.002,
+		SessionBoostWeight:       0.003,
+		IntentLLMFallback:        getEnv("INTENT_LLM_FALLBACK", "false") == "true",
+		IntentLLMModel:           NormalizeModelID(getEnv("GEMINI_TEXT_MODEL", getEnv("GEMINI_LITE_MODEL", "gemini-3.8-flash"))),
+		ProLLMModel:              NormalizeModelID(getEnv("GEMINI_PRO_MODEL", "gemini-4-argon")),
 		LTRModelJSON:             os.Getenv("LTR_MODEL_JSON"),
 		DefaultAlpha:             0.5,
 		DefaultLimit:             20,
@@ -65,6 +84,9 @@ func Load() (*Config, error) {
 		cfg.GeminiEmbeddingDimension = dim
 	}
 	cfg.EmbeddingDimension = cfg.ActiveDimension()
+	if w, err := strconv.ParseFloat(getEnv("SESSION_BOOST_WEIGHT", "0.003"), 64); err == nil && w >= 0 && w <= 0.05 {
+		cfg.SessionBoostWeight = w
+	}
 	if w, err := strconv.ParseFloat(getEnv("BOOST_WEIGHT", "0.002"), 64); err == nil && w >= 0 && w <= 0.05 {
 		cfg.BoostWeight = w
 	}

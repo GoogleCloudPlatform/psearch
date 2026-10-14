@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import React, { useState, useMemo, useCallback, useEffect, memo } from 'react';
+import React, { useState, useMemo, useCallback, useEffect, useRef, memo } from 'react';
 import { BrowserRouter as Router, Routes, Route, Link, useNavigate } from 'react-router-dom';
 import {
     Container,
@@ -46,6 +46,8 @@ import Filters from './components/Filters'; // Import the custom filters compone
 import AIFilterSuggestion from './components/AIFilterSuggestion'; // Import the AI filter suggestion component
 import ProductImage from './components/ProductImage'; // Import the optimized ProductImage component
 import SearchInput from './components/SearchInput'; // Import the new isolated search component
+import SessionPanel from './components/SessionPanel';
+import { getSessionId, recordSessionEvent } from './services/sessionService';
 import axios from 'axios';
 import config from './config';
 const API_URL = config.apiUrl;
@@ -72,6 +74,25 @@ function ProductSearch({
     const [effectiveLtr, setEffectiveLtr] = useState(false);
     const [ltrModel, setLtrModel] = useState(null);
     const [ltrLatencyUs, setLtrLatencyUs] = useState(null);
+    const [parseIntent, setParseIntent] = useState(true);
+    const [parsedQuery, setParsedQuery] = useState(null);
+    const [activeExtractedFilters, setActiveExtractedFilters] = useState(null);
+    const [cleanQueryBase, setCleanQueryBase] = useState('');
+    const [autoCorrected, setAutoCorrected] = useState(false);
+    const [queryRelaxed, setQueryRelaxed] = useState(false);
+    const [didYouMean, setDidYouMean] = useState('');
+    const [responseQuery, setResponseQuery] = useState('');
+    const activeExtractedFiltersRef = useRef(activeExtractedFilters);
+    activeExtractedFiltersRef.current = activeExtractedFilters;
+    const parseIntentRef = useRef(parseIntent);
+    parseIntentRef.current = parseIntent;
+    const cleanQueryBaseRef = useRef(cleanQueryBase);
+    cleanQueryBaseRef.current = cleanQueryBase;
+    const [sessionId, setSessionId] = useState(() => getSessionId());
+    const sessionIdRef = useRef(sessionId);
+    sessionIdRef.current = sessionId;
+    const [personalized, setPersonalized] = useState(false);
+    const [sessionRefreshKey, setSessionRefreshKey] = useState(0);
     const [internalTenantId, setInternalTenantId] = useState('default');
     const [internalLocale, setInternalLocale] = useState('');
     const tenantId = propTenantId !== undefined ? propTenantId : internalTenantId;
@@ -84,6 +105,10 @@ function ProductSearch({
     const [effectiveLocale, setEffectiveLocale] = useState(null);
     const [expandedTerms, setExpandedTerms] = useState([]);
     const [appliedRules, setAppliedRules] = useState([]);
+    const [priceTableId, setPriceTableId] = useState('');
+    const [effectivePriceTableId, setEffectivePriceTableId] = useState('');
+    const [sortBy, setSortBy] = useState('');
+    const [effectiveSortBy, setEffectiveSortBy] = useState('');
     const [serverFacets, setServerFacets] = useState(null);
     const [facetsLatencyMs, setFacetsLatencyMs] = useState(null);
     // State for the filters component - now a dynamic object
@@ -481,28 +506,67 @@ function ProductSearch({
         ? selectedFilters.brands[0]
         : '';
 
-    const fetchProducts = useCallback(async () => {
+    const fetchProducts = useCallback(async (searchParams) => {
         setLoading(true);
         setError(null);
         try {
+            const queryToUse = (searchParams && searchParams.query !== undefined)
+                ? searchParams.query
+                : activeSearchQuery;
+            const parseIntentToUse = (searchParams && searchParams.parseIntent !== undefined)
+                ? searchParams.parseIntent
+                : parseIntentRef.current;
+            const extractedFiltersToUse = (searchParams && searchParams.extractedFilters !== undefined)
+                ? searchParams.extractedFilters
+                : activeExtractedFiltersRef.current;
+            const priceTableIdToUse = (searchParams && searchParams.priceTableId !== undefined)
+                ? searchParams.priceTableId
+                : priceTableId;
+            const sortByToUse = (searchParams && searchParams.sortBy !== undefined)
+                ? searchParams.sortBy
+                : sortBy;
+            const sessionIdToUse = (searchParams && searchParams.sessionId !== undefined)
+                ? searchParams.sessionId
+                : (sessionIdRef.current || getSessionId());
+
             const payload = {
-                query: activeSearchQuery,
+                query: queryToUse,
                 limit: 300,
                 min_score: 0.01,
                 alpha: typeof alpha === 'number' ? alpha : 0.5,
                 only_in_stock: Boolean(onlyInStock),
                 tenant_id: tenantId || 'default',
             };
+            if (sessionIdToUse) {
+                payload.session_id = sessionIdToUse;
+            }
+            if (parseIntentToUse !== undefined) {
+                payload.parse_intent = Boolean(parseIntentToUse);
+            }
+            if (extractedFiltersToUse) {
+                if (extractedFiltersToUse.min_price !== undefined && extractedFiltersToUse.min_price !== null && Number(extractedFiltersToUse.min_price) > 0) {
+                    payload.min_price = Number(extractedFiltersToUse.min_price);
+                }
+                if (extractedFiltersToUse.max_price !== undefined && extractedFiltersToUse.max_price !== null && Number(extractedFiltersToUse.max_price) > 0) {
+                    payload.max_price = Number(extractedFiltersToUse.max_price);
+                }
+                if (extractedFiltersToUse.brand) {
+                    payload.brand = String(extractedFiltersToUse.brand);
+                }
+                if (extractedFiltersToUse.category) {
+                    payload.category = String(extractedFiltersToUse.category);
+                }
+            }
             if (locale) {
                 payload.locale = locale;
             }
             if (channel && channel !== 'All' && channel !== 'all') {
                 payload.channel = channel;
             }
-            if (selectedCategory) {
+            if (selectedCategory && (!extractedFiltersToUse || !extractedFiltersToUse.category)) {
                 payload.category = selectedCategory;
             }
-            if (selectedBrand) {
+            if (selectedBrand && (!extractedFiltersToUse || !extractedFiltersToUse.brand)) {
                 payload.brand = selectedBrand;
             }
             if (cep && cep.trim()) {
@@ -514,12 +578,36 @@ function ProductSearch({
             if (ltr) {
                 payload.ltr = true;
             }
+            if (priceTableIdToUse) {
+                payload.price_table_id = priceTableIdToUse;
+            }
+            if (sortByToUse) {
+                payload.sort_by = sortByToUse;
+            }
 
             const response = await axios.post(`${API_URL}/search`, payload);
 
             console.log("API Response:", JSON.stringify(response.data, null, 2));
 
             if (response.data) {
+                setResponseQuery(response.data.query || queryToUse);
+                setAutoCorrected(Boolean(response.data.auto_corrected));
+                setDidYouMean(response.data.did_you_mean || '');
+                setQueryRelaxed(Boolean(response.data.query_relaxed));
+                if (response.data.parsed_query) {
+                    setParsedQuery(response.data.parsed_query);
+                    const ext = response.data.parsed_query.extracted_filters || {};
+                    setActiveExtractedFilters(ext);
+                    activeExtractedFiltersRef.current = ext;
+                    const cleanQ = response.data.parsed_query.clean_query || queryToUse;
+                    setCleanQueryBase(cleanQ);
+                    cleanQueryBaseRef.current = cleanQ;
+                } else if (searchParams && searchParams.extractedFilters !== undefined) {
+                    setActiveExtractedFilters(searchParams.extractedFilters);
+                    activeExtractedFiltersRef.current = searchParams.extractedFilters;
+                } else if (!parseIntentToUse) {
+                    setParsedQuery(null);
+                }
                 if (response.data.effective_alpha !== undefined) {
                     setEffectiveAlpha(response.data.effective_alpha);
                 }
@@ -570,6 +658,21 @@ function ProductSearch({
                 } else {
                     setLtrLatencyUs(null);
                 }
+                if (response.data.price_table_id !== undefined) {
+                    setEffectivePriceTableId(response.data.price_table_id);
+                } else {
+                    setEffectivePriceTableId('');
+                }
+                if (response.data.sort_by !== undefined) {
+                    setEffectiveSortBy(response.data.sort_by);
+                } else {
+                    setEffectiveSortBy('');
+                }
+                if (response.data.personalized !== undefined) {
+                    setPersonalized(Boolean(response.data.personalized));
+                } else {
+                    setPersonalized(false);
+                }
             }
 
             // Simple processing - just map products without modifying anything
@@ -601,6 +704,12 @@ function ProductSearch({
             // Show AI filter suggestions if we have products and a search query
             setShowAIFilterSuggestions(processedResults.length > 0 && activeSearchQuery.trim() !== '');
         } catch (error) {
+            setAutoCorrected(false);
+            setQueryRelaxed(false);
+            setDidYouMean('');
+            setEffectivePriceTableId('');
+            setEffectiveSortBy('');
+            setPersonalized(false);
             const serverErrMsg = error.response?.data?.error || error.response?.data?.message;
             const displayError = serverErrMsg || error.message || 'An error occurred while searching';
             setError(displayError);
@@ -609,7 +718,7 @@ function ProductSearch({
         } finally {
             setLoading(false);
         }
-    }, [activeSearchQuery, alpha, channel, onlyInStock, selectedCategory, selectedBrand, tenantId, locale, cep, maxSla24h, ltr]);
+    }, [activeSearchQuery, alpha, channel, onlyInStock, selectedCategory, selectedBrand, tenantId, locale, cep, maxSla24h, ltr, priceTableId, sortBy]);
 
     // Handler for filter changes from the Filters component - now works with dynamic filter IDs
     const handleFilterChange = useCallback((filterId, value, isChecked) => {
@@ -763,11 +872,60 @@ function ProductSearch({
         if (options.ltr !== undefined) {
             setLtr(options.ltr);
         }
+        if (options.parseIntent !== undefined) {
+            setParseIntent(options.parseIntent);
+            parseIntentRef.current = options.parseIntent;
+        }
+        if (options.priceTableId !== undefined) {
+            setPriceTableId(options.priceTableId);
+        }
+        if (options.sortBy !== undefined) {
+            setSortBy(options.sortBy);
+        }
+        setParsedQuery(null);
+        setActiveExtractedFilters(null);
+        activeExtractedFiltersRef.current = null;
+        setCleanQueryBase('');
+        cleanQueryBaseRef.current = '';
+        setAutoCorrected(false);
+        setQueryRelaxed(false);
+        setDidYouMean('');
+        setResponseQuery('');
+        const nextQuery = typeof searchText === 'string' ? searchText : searchText?.query || '';
+        if (nextQuery === activeSearchQuery && nextQuery.trim()) {
+            fetchProducts({
+                query: nextQuery,
+                parseIntent: options.parseIntent !== undefined ? options.parseIntent : parseIntentRef.current,
+                priceTableId: options.priceTableId !== undefined ? options.priceTableId : priceTableId,
+                sortBy: options.sortBy !== undefined ? options.sortBy : sortBy,
+            });
+        }
         // Update active search query which triggers API call
-        setActiveSearchQuery(typeof searchText === 'string' ? searchText : searchText?.query || '');
+        setActiveSearchQuery(nextQuery);
         // Reset AI filter suggestions when a new search is performed
         setShowAIFilterSuggestions(true);
-    }, [setTenantId, setLocale]);
+    }, [setTenantId, setLocale, fetchProducts, activeSearchQuery, priceTableId, sortBy]);
+
+    const handleRemoveExtractedFilter = useCallback((filterKey) => {
+        const currentFilters = activeExtractedFiltersRef.current || {};
+        const nextFilters = { ...currentFilters };
+        delete nextFilters[filterKey];
+        if (filterKey === 'price') {
+            delete nextFilters.min_price;
+            delete nextFilters.max_price;
+        }
+        setActiveExtractedFilters(nextFilters);
+        activeExtractedFiltersRef.current = nextFilters;
+        setParseIntent(false);
+        parseIntentRef.current = false;
+
+        const q = cleanQueryBaseRef.current || activeSearchQuery;
+        fetchProducts({
+            query: q,
+            parseIntent: false,
+            extractedFilters: nextFilters,
+        });
+    }, [fetchProducts, activeSearchQuery]);
 
     useEffect(() => {
         if (activeSearchQuery.trim()) {
@@ -802,8 +960,17 @@ function ProductSearch({
 
     // Stable handler for product clicks
     const handleProductClick = useCallback((productId) => {
+        recordSessionEvent(productId, 'click', tenantId);
+        setSessionRefreshKey(prev => prev + 1);
         navigate(`/product/${productId}`);
-    }, [navigate]);
+    }, [navigate, tenantId]);
+
+    const handleSessionUpdate = useCallback((newSessionId) => {
+        setSessionId(newSessionId);
+        sessionIdRef.current = newSessionId;
+        setSessionRefreshKey(prev => prev + 1);
+        fetchProducts({ sessionId: newSessionId });
+    }, [fetchProducts]);
 
     // Optimized product grid with exactly 6 products per row
     const ProductGrid = memo(({ products, onProductClick }) => {
@@ -922,7 +1089,26 @@ function ProductSearch({
                                         <Typography variant="h6" color="primary">
                                             ${product.priceInfo?.price}
                                         </Typography>
-                                        {product.priceInfo?.originalPrice &&
+                                        {product.priceInfo?.priceTableId ? (
+                                            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, flexWrap: 'wrap', mb: 0.5 }}>
+                                                <Typography
+                                                    variant="body2"
+                                                    color="text.secondary"
+                                                    sx={{ textDecoration: 'line-through' }}
+                                                >
+                                                    ${product.priceInfo?.basePrice !== undefined && product.priceInfo?.basePrice !== null
+                                                        ? Number(product.priceInfo.basePrice).toFixed(2)
+                                                        : (product.priceInfo?.originalPrice || '')}
+                                                </Typography>
+                                                <Chip
+                                                    label={`Contrato: ${product.priceInfo.priceTableId}`}
+                                                    size="small"
+                                                    color="secondary"
+                                                    variant="outlined"
+                                                    sx={{ height: 20, fontSize: '0.7rem' }}
+                                                />
+                                            </Box>
+                                        ) : (product.priceInfo?.originalPrice &&
                                             product.priceInfo.originalPrice !== "0" &&
                                             parseFloat(product.priceInfo.originalPrice) > parseFloat(product.priceInfo.price) && (
                                                 <Typography
@@ -932,7 +1118,7 @@ function ProductSearch({
                                                 >
                                                     ${product.priceInfo.originalPrice}
                                                 </Typography>
-                                            )}
+                                            ))}
                                         {(() => {
                                             const isStockIn = product.availability === 'IN_STOCK';
                                             const stockBadge = isStockIn
@@ -995,6 +1181,22 @@ function ProductSearch({
                                                         }
                                                         return null;
                                                     })()}
+                                                    {(() => {
+                                                        const s = product.score || {};
+                                                        if (personalized && s.session_boost !== undefined) {
+                                                            const b = Number(s.session_boost);
+                                                            return (
+                                                                <Chip
+                                                                    label={`boost: +${b.toFixed(4)}`}
+                                                                    size="small"
+                                                                    color={b > 0 ? "secondary" : "default"}
+                                                                    variant="outlined"
+                                                                    sx={{ fontWeight: 600, height: 24, fontSize: '0.75rem' }}
+                                                                />
+                                                            );
+                                                        }
+                                                        return null;
+                                                    })()}
                                                 </Box>
                                             );
                                         })()}
@@ -1020,6 +1222,11 @@ function ProductSearch({
                     maxWidth: { xs: '100%', sm: '33.333%', md: '25%' },
                     display: { xs: 'none', sm: 'block' } 
                 }}>
+                    <SessionPanel
+                        onSessionUpdate={handleSessionUpdate}
+                        tenantId={tenantId}
+                        refreshKey={sessionRefreshKey}
+                    />
                     <Card sx={{
                         p: 2,
                         boxShadow: '0 1px 3px rgba(0,0,0,0.08)',
@@ -1056,6 +1263,11 @@ function ProductSearch({
                     width: '100%',
                     mb: 2
                 }}>
+                    <SessionPanel
+                        onSessionUpdate={handleSessionUpdate}
+                        tenantId={tenantId}
+                        refreshKey={sessionRefreshKey}
+                    />
                     <Card sx={{
                         p: 2,
                         boxShadow: '0 1px 3px rgba(0,0,0,0.08)',
@@ -1092,6 +1304,7 @@ function ProductSearch({
                     {/* Use the isolated SearchInput component */}
                     <SearchInput
                         onSearch={handleSearch}
+                        query={activeSearchQuery}
                         alpha={alpha}
                         setAlpha={setAlpha}
                         channel={channel}
@@ -1108,6 +1321,15 @@ function ProductSearch({
                         setMaxSla24h={setMaxSla24h}
                         ltr={ltr}
                         setLtr={setLtr}
+                        parseIntent={parseIntent}
+                        setParseIntent={(val) => {
+                            setParseIntent(val);
+                            parseIntentRef.current = val;
+                        }}
+                        priceTableId={priceTableId}
+                        setPriceTableId={setPriceTableId}
+                        sortBy={sortBy}
+                        setSortBy={setSortBy}
                     />
 
                     {/* Display search result count and search metadata */}
@@ -1126,6 +1348,136 @@ function ProductSearch({
                             allProducts={products} // Pass all products for smart filtering
                         />
 
+                        {/* Zero-results recovery banner (Issue #21) */}
+                        {autoCorrected && didYouMean ? (
+                            <Alert severity="info" sx={{ mb: 2, alignItems: 'center' }}>
+                                <span>Mostrando resultados para &quot;{didYouMean}&quot;. </span>
+                                <Button
+                                    variant="text"
+                                    color="primary"
+                                    size="small"
+                                    onClick={() => {
+                                        const orig = responseQuery || activeSearchQuery;
+                                        setParseIntent(false);
+                                        parseIntentRef.current = false;
+                                        setActiveSearchQuery(orig);
+                                        fetchProducts({
+                                            query: orig,
+                                            parseIntent: false,
+                                            extractedFilters: null,
+                                        });
+                                    }}
+                                    sx={{
+                                        textTransform: 'none',
+                                        p: 0,
+                                        minWidth: 'auto',
+                                        verticalAlign: 'baseline',
+                                        fontWeight: 600,
+                                        textDecoration: 'underline',
+                                        cursor: 'pointer',
+                                    }}
+                                >
+                                    Buscar por &quot;{responseQuery || activeSearchQuery}&quot;
+                                </Button>
+                            </Alert>
+                        ) : !autoCorrected && didYouMean ? (
+                            <Alert severity="info" sx={{ mb: 2, alignItems: 'center' }}>
+                                <span>Você quis dizer: </span>
+                                <Button
+                                    variant="text"
+                                    color="primary"
+                                    size="small"
+                                    onClick={() => {
+                                        setActiveSearchQuery(didYouMean);
+                                        fetchProducts({
+                                            query: didYouMean,
+                                            parseIntent: parseIntentRef.current,
+                                            extractedFilters: null,
+                                        });
+                                    }}
+                                    sx={{
+                                        textTransform: 'none',
+                                        p: 0,
+                                        minWidth: 'auto',
+                                        verticalAlign: 'baseline',
+                                        fontWeight: 600,
+                                        textDecoration: 'underline',
+                                        cursor: 'pointer',
+                                    }}
+                                >
+                                    {didYouMean}?
+                                </Button>
+                            </Alert>
+                        ) : queryRelaxed ? (
+                            <Alert severity="info" sx={{ mb: 2 }}>
+                                Nenhum resultado com todos os termos — mostrando resultados com qualquer um deles
+                            </Alert>
+                        ) : null}
+
+                        {/* Smart query intent chips (Issue #19) */}
+                        {activeExtractedFilters && Object.keys(activeExtractedFilters).length > 0 && (
+                            <Box sx={{ mb: 2, display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
+                                <Typography variant="body2" sx={{ fontWeight: 600, color: 'text.secondary', mr: 0.5 }}>
+                                    Smart query:
+                                </Typography>
+                                {cleanQueryBase && (
+                                    <Chip
+                                        size="small"
+                                        color="primary"
+                                        variant="outlined"
+                                        label={`Query: "${cleanQueryBase}"`}
+                                    />
+                                )}
+                                {activeExtractedFilters.min_price !== undefined && activeExtractedFilters.min_price !== null && Number(activeExtractedFilters.min_price) > 0 && (
+                                    <Chip
+                                        size="small"
+                                        color="primary"
+                                        label={`Preço ≥ ${activeExtractedFilters.min_price}`}
+                                        onDelete={() => handleRemoveExtractedFilter('min_price')}
+                                    />
+                                )}
+                                {activeExtractedFilters.max_price !== undefined && activeExtractedFilters.max_price !== null && Number(activeExtractedFilters.max_price) > 0 && (
+                                    <Chip
+                                        size="small"
+                                        color="primary"
+                                        label={`Preço ≤ ${activeExtractedFilters.max_price}`}
+                                        onDelete={() => handleRemoveExtractedFilter('max_price')}
+                                    />
+                                )}
+                                {activeExtractedFilters.brand && (
+                                    <Chip
+                                        size="small"
+                                        color="primary"
+                                        label={`Marca: ${activeExtractedFilters.brand}`}
+                                        onDelete={() => handleRemoveExtractedFilter('brand')}
+                                    />
+                                )}
+                                {activeExtractedFilters.category && (
+                                    <Chip
+                                        size="small"
+                                        color="primary"
+                                        label={`Categoria: ${activeExtractedFilters.category}`}
+                                        onDelete={() => handleRemoveExtractedFilter('category')}
+                                    />
+                                )}
+                                {activeExtractedFilters.color && (
+                                    <Chip
+                                        size="small"
+                                        variant="outlined"
+                                        label={`Cor: ${activeExtractedFilters.color}`}
+                                    />
+                                )}
+                                {parsedQuery?.intent_source && parsedQuery.intent_source !== 'none' && (
+                                    <Chip
+                                        size="small"
+                                        variant="outlined"
+                                        sx={{ fontStyle: 'italic', opacity: 0.8 }}
+                                        label={`(${parsedQuery.intent_source})`}
+                                    />
+                                )}
+                            </Box>
+                        )}
+
                         <Box sx={{ mb: 2, display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 1 }}>
                             <Typography variant="body2" color="text.secondary">
                                 {products.length ? `Found ${products.length} products` : 'No products found. Try a search!'}
@@ -1136,8 +1488,15 @@ function ProductSearch({
                                 {facetsLatencyMs !== null && ` • facets: ${Number(facetsLatencyMs).toFixed(1)}ms`}
                                 {appliedRules && appliedRules.length > 0 && ` • applied_rules: ${appliedRules.join(', ')}`}
                                 {effectiveLtr && ltrModel && ` • ltr: ${ltrModel} (${ltrLatencyUs || 0}µs)`}
+                                {parsedQuery && parsedQuery.intent_source && parsedQuery.intent_source !== 'none' && ` • intent: ${parsedQuery.intent_source}`}
+                                {effectivePriceTableId && ` • price_table: ${effectivePriceTableId}`}
+                                {effectiveSortBy && ` • sort: ${effectiveSortBy}`}
+                                {personalized && ` • Personalizado`}
                             </Typography>
                             <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap' }}>
+                                {personalized && (
+                                    <Chip size="small" color="secondary" label="Personalizado" />
+                                )}
                                 {effectiveAlpha !== null && (
                                     <Chip size="small" variant="outlined" label={`effective_alpha: ${effectiveAlpha}`} />
                                 )}
@@ -1161,6 +1520,15 @@ function ProductSearch({
                                 )}
                                 {effectiveLtr && ltrLatencyUs !== null && ltrLatencyUs !== undefined && (
                                     <Chip size="small" variant="outlined" label={`ltr_latency: ${ltrLatencyUs}µs`} />
+                                )}
+                                {parsedQuery && parsedQuery.intent_source && parsedQuery.intent_source !== 'none' && (
+                                    <Chip size="small" color="info" variant="outlined" label={`intent: ${parsedQuery.intent_source}`} />
+                                )}
+                                {effectivePriceTableId && (
+                                    <Chip size="small" color="primary" variant="outlined" label={`price_table: ${effectivePriceTableId}`} />
+                                )}
+                                {effectiveSortBy && (
+                                    <Chip size="small" variant="outlined" label={`sort: ${effectiveSortBy}`} />
                                 )}
                             </Box>
                         </Box>

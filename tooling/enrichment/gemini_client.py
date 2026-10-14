@@ -19,10 +19,9 @@ from functools import lru_cache
 from google import genai
 from google.genai import types
 
-# Issue #11: migrated from the deprecated `vertexai.generative_models` SDK to the
-# Google Gen AI SDK (`google-genai`). Gemini 3.x is served from the Vertex AI
+# Issue #11 / #23: migrated to Google Gen AI SDK (`google-genai`). Gemini 3.8 / 4.x is served from Vertex AI
 # "global" location, not us-central1.
-GEMINI_TEXT_MODEL = os.environ.get("GEMINI_TEXT_MODEL", "gemini-3.5-flash")
+GEMINI_TEXT_MODEL = os.environ.get("GEMINI_TEXT_MODEL", "gemini-3.8-flash")
 GENAI_LOCATION = os.environ.get("GENAI_LOCATION", "global")
 
 
