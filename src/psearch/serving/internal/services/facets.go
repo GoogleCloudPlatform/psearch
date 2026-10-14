@@ -39,7 +39,9 @@ func (s *SpannerService) Facets(ctx context.Context, ids []string, priceTable, t
 		return f, nil
 	}
 	if s.client == nil {
-		return s.memoryFacets(ids, priceTable), nil
+		mf := s.memoryFacets(ids, priceTable)
+		mf.Colors, mf.Sizes, _ = s.variantFacets(ctx, ids)
+		return mf, nil
 	}
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() (err error) {
@@ -53,6 +55,10 @@ func (s *SpannerService) Facets(ctx context.Context, ids []string, priceTable, t
 	})
 	g.Go(func() (err error) {
 		f.Availability, err = s.queryFacet(gctx, facetAvailabilitySQL, ids, priceTable, tenant)
+		return
+	})
+	g.Go(func() (err error) {
+		f.Colors, f.Sizes, err = s.variantFacets(gctx, ids)
 		return
 	})
 	if err := g.Wait(); err != nil {

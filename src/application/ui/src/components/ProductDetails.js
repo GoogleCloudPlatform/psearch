@@ -701,6 +701,44 @@ function ProductDetails() {
                                 </Button>
                             </CardContent>
                         </Card>
+
+                        {/* Variants section */}
+                        {Array.isArray(product.variants) && product.variants.length > 0 && (
+                            <Card sx={{ mt: 3 }}>
+                                <CardContent>
+                                    <Typography variant="subtitle1" sx={{ fontWeight: 600, mb: 1.5 }}>
+                                        Variantes ({product.variant_count || product.variants.length} SKUs)
+                                    </Typography>
+                                    <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1 }}>
+                                        {product.variants.map((v) => {
+                                            const isAvail = Boolean(v.available) && (v.stock === undefined || v.stock > 0);
+                                            const parts = [];
+                                            if (v.color) parts.push(v.color);
+                                            if (v.size) parts.push(`Tam ${v.size}`);
+                                            const labelText = parts.length > 0
+                                                ? `${parts.join(' / ')} (${v.stock ?? 0} unid.)`
+                                                : `${v.sku_id} (${v.stock ?? 0} unid.)`;
+                                            return (
+                                                <Chip
+                                                    key={v.sku_id || `${v.color}-${v.size}`}
+                                                    label={labelText}
+                                                    size="small"
+                                                    color={isAvail ? 'primary' : 'default'}
+                                                    variant={isAvail ? 'outlined' : 'filled'}
+                                                    disabled={!isAvail}
+                                                    sx={{
+                                                        opacity: isAvail ? 1 : 0.45,
+                                                        textDecoration: isAvail ? 'none' : 'line-through',
+                                                        color: isAvail ? 'text.primary' : 'text.disabled',
+                                                        backgroundColor: isAvail ? 'transparent' : 'action.disabledBackground',
+                                                    }}
+                                                />
+                                            );
+                                        })}
+                                    </Box>
+                                </CardContent>
+                            </Card>
+                        )}
                     </Grid>
 
                     {/* Product information section */}
