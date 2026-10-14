@@ -90,6 +90,23 @@ func main() {
 	} else {
 		log.Printf("OK   delivery promises for 01310: %d products", len(p))
 	}
+	// Autocomplete: n-gram and 1-char prefix paths.
+	ac := services.NewAutocompleteService(svc.Client(), nil, time.Second)
+	for _, q := range []string{"gel", "tên", "n"} {
+		if out, _, err := ac.Suggest(ctx, "default", "", q, 5); err != nil {
+			failed = true
+			log.Printf("FAIL autocomplete %q: %v", q, err)
+		} else {
+			log.Printf("OK   autocomplete %q -> %d suggestions", q, len(out))
+		}
+	}
+	// LTR stage-2 inputs: boost signals for candidates.
+	if sig, err := svc.CandidateSignals(ctx, []string{"prod-001", "prod-002", "prod-003"}); err != nil {
+		failed = true
+		log.Printf("FAIL ltr candidate signals: %v", err)
+	} else {
+		log.Printf("OK   ltr candidate signals: %d products", len(sig))
+	}
 	// Facet queries over the full catalog.
 	if f, err := svc.Facets(ctx, []string{"prod-001", "prod-002", "prod-004", "prod-012"}); err != nil {
 		failed = true

@@ -14,7 +14,9 @@
  * limitations under the License.
  */
 
-import React, { useState, useEffect, useRef, memo } from 'react';
+import React, { useState, useEffect, useRef, useCallback, memo } from 'react';
+import axios from 'axios';
+import config from '../config';
 import {
     TextField,
     InputAdornment,
@@ -48,6 +50,8 @@ const SearchInput = memo(({
     setCep: controlledSetCep,
     maxSla24h: controlledMaxSla24h,
     setMaxSla24h: controlledSetMaxSla24h,
+    ltr: controlledLtr,
+    setLtr: controlledSetLtr,
 }) => {
     const [inputValue, setInputValue] = useState('');
     const [internalAlpha, setInternalAlpha] = useState(0.5);
@@ -57,7 +61,13 @@ const SearchInput = memo(({
     const [internalLocale] = useState('');
     const [internalCep, setInternalCep] = useState('');
     const [internalMaxSla24h, setInternalMaxSla24h] = useState(false);
+    const [internalLtr, setInternalLtr] = useState(false);
     const [cepError, setCepError] = useState('');
+    const [suggestions, setSuggestions] = useState([]);
+    const [isOpen, setIsOpen] = useState(false);
+    const [selectedIndex, setSelectedIndex] = useState(-1);
+    const containerRef = useRef(null);
+    const autocompleteTimerRef = useRef(null);
     const debounceTimerRef = useRef(null);
 
     const alpha = controlledAlpha !== undefined ? controlledAlpha : internalAlpha;
@@ -72,6 +82,8 @@ const SearchInput = memo(({
     const setCep = controlledSetCep || setInternalCep;
     const maxSla24h = controlledMaxSla24h !== undefined ? controlledMaxSla24h : internalMaxSla24h;
     const setMaxSla24h = controlledSetMaxSla24h || setInternalMaxSla24h;
+    const ltr = controlledLtr !== undefined ? controlledLtr : internalLtr;
+    const setLtr = controlledSetLtr || setInternalLtr;
 
     // Local slider value for responsive dragging
     const [localAlpha, setLocalAlpha] = useState(alpha);
@@ -80,9 +92,67 @@ const SearchInput = memo(({
         setLocalAlpha(alpha);
     }, [alpha]);
 
-    // Handle input change without propagating all changes to parent
+    const fetchAutocomplete = useCallback(async (prefix) => {
+        if (!prefix || prefix.trim().length < 2) {
+            setSuggestions([]);
+            setIsOpen(false);
+            setSelectedIndex(-1);
+            return;
+        }
+        try {
+            const params = new URLSearchParams({
+                q: prefix.trim(),
+                limit: '8',
+            });
+            if (tenantId) params.append('tenant_id', tenantId);
+            if (locale) params.append('locale', locale);
+            const res = await axios.get(`${config.apiUrl}/api/autocomplete?${params.toString()}`);
+            if (res.data && Array.isArray(res.data.suggestions)) {
+                setSuggestions(res.data.suggestions);
+                setIsOpen(res.data.suggestions.length > 0);
+                setSelectedIndex(-1);
+            } else {
+                setSuggestions([]);
+                setIsOpen(false);
+            }
+        } catch (err) {
+            setSuggestions([]);
+            setIsOpen(false);
+        }
+    }, [tenantId, locale]);
+
+    // Handle input change with debounced (~150ms) typeahead
     const handleInputChange = (e) => {
-        setInputValue(e.target.value);
+        const val = e.target.value;
+        setInputValue(val);
+        if (autocompleteTimerRef.current) {
+            clearTimeout(autocompleteTimerRef.current);
+        }
+        if (val.trim().length >= 2) {
+            autocompleteTimerRef.current = setTimeout(() => {
+                fetchAutocomplete(val);
+            }, 150);
+        } else {
+            setSuggestions([]);
+            setIsOpen(false);
+            setSelectedIndex(-1);
+        }
+    };
+
+    const handleSelectSuggestion = (suggestionText) => {
+        setInputValue(suggestionText);
+        setIsOpen(false);
+        setSelectedIndex(-1);
+        onSearch(suggestionText, {
+            alpha: localAlpha,
+            channel,
+            onlyInStock,
+            tenantId,
+            locale,
+            cep,
+            maxSla24h,
+            ltr,
+        });
     };
 
     const handleCepChange = (e) => {
@@ -101,6 +171,8 @@ const SearchInput = memo(({
 
     // Submit search only when user explicitly requests it
     const handleSubmitSearch = () => {
+        setIsOpen(false);
+        setSelectedIndex(-1);
         const raw = (cep || '').replace(/\D/g, '');
         if (raw.length > 0 && raw.length < 8) {
             setCepError('CEP deve ter 8 dígitos');
@@ -112,20 +184,58 @@ const SearchInput = memo(({
             tenantId,
             locale,
             cep,
-            maxSla24h
+            maxSla24h,
+            ltr
         });
     };
 
-    // Handle Enter key press
+    // Handle keyboard navigation (up/down/enter/esc)
     const handleKeyDown = (event) => {
-        if (event.key === 'Enter') {
-            handleSubmitSearch();
+        if (event.key === 'ArrowDown') {
+            if (isOpen && suggestions.length > 0) {
+                event.preventDefault();
+                setSelectedIndex(prev => (prev < suggestions.length - 1 ? prev + 1 : 0));
+            }
+        } else if (event.key === 'ArrowUp') {
+            if (isOpen && suggestions.length > 0) {
+                event.preventDefault();
+                setSelectedIndex(prev => (prev > 0 ? prev - 1 : suggestions.length - 1));
+            }
+        } else if (event.key === 'Enter') {
+            if (isOpen && selectedIndex >= 0 && selectedIndex < suggestions.length) {
+                event.preventDefault();
+                const sel = suggestions[selectedIndex];
+                const text = typeof sel === 'object' ? sel.text : sel;
+                handleSelectSuggestion(text);
+            } else {
+                handleSubmitSearch();
+            }
+        } else if (event.key === 'Escape') {
+            setIsOpen(false);
+            setSelectedIndex(-1);
         }
     };
 
-    // Clean up timer on unmount
+    // Close suggestions dropdown on outside click
+    useEffect(() => {
+        const handleClickOutside = (event) => {
+            if (containerRef.current && !containerRef.current.contains(event.target)) {
+                setIsOpen(false);
+                setSelectedIndex(-1);
+            }
+        };
+        document.addEventListener('mousedown', handleClickOutside);
+        return () => {
+            document.removeEventListener('mousedown', handleClickOutside);
+        };
+    }, []);
+
+    // Clean up timers on unmount
     useEffect(() => {
         return () => {
+            if (autocompleteTimerRef.current) {
+                clearTimeout(autocompleteTimerRef.current);
+            }
             if (debounceTimerRef.current) {
                 clearTimeout(debounceTimerRef.current);
             }
@@ -134,7 +244,7 @@ const SearchInput = memo(({
 
     return (
         <Paper variant="outlined" sx={{ p: 2.5, mb: 3, borderRadius: 2 }}>
-            <Box sx={{ mb: 2 }}>
+            <Box sx={{ mb: 2, position: 'relative' }} ref={containerRef}>
                 <TextField
                     fullWidth
                     label="Search products"
@@ -142,6 +252,7 @@ const SearchInput = memo(({
                     value={inputValue}
                     onChange={handleInputChange}
                     onKeyDown={handleKeyDown}
+                    autoComplete="off"
                     InputProps={{
                         endAdornment: (
                             <InputAdornment position="end">
@@ -157,6 +268,58 @@ const SearchInput = memo(({
                         )
                     }}
                 />
+                {isOpen && suggestions.length > 0 && (
+                    <Paper
+                        elevation={4}
+                        sx={{
+                            position: 'absolute',
+                            top: '100%',
+                            left: 0,
+                            right: 0,
+                            zIndex: 1300,
+                            mt: 0.5,
+                            maxHeight: 320,
+                            overflowY: 'auto',
+                            border: '1px solid',
+                            borderColor: 'divider',
+                            borderRadius: 1,
+                        }}
+                    >
+                        {suggestions.map((suggestion, index) => {
+                            const isSelected = selectedIndex === index;
+                            const text = typeof suggestion === 'object' ? suggestion.text : suggestion;
+                            return (
+                                <Box
+                                    key={index}
+                                    onClick={() => handleSelectSuggestion(text)}
+                                    sx={{
+                                        px: 2,
+                                        py: 1.25,
+                                        cursor: 'pointer',
+                                        backgroundColor: isSelected ? 'action.selected' : 'inherit',
+                                        '&:hover': {
+                                            backgroundColor: 'action.hover',
+                                        },
+                                        display: 'flex',
+                                        justifyContent: 'space-between',
+                                        alignItems: 'center',
+                                        borderBottom: index < suggestions.length - 1 ? '1px solid' : 'none',
+                                        borderColor: 'divider',
+                                    }}
+                                >
+                                    <Typography variant="body2" sx={{ fontWeight: isSelected ? 600 : 400 }}>
+                                        {text}
+                                    </Typography>
+                                    {typeof suggestion === 'object' && suggestion.locale && (
+                                        <Typography variant="caption" color="text.secondary">
+                                            {suggestion.locale}
+                                        </Typography>
+                                    )}
+                                </Box>
+                            );
+                        })}
+                    </Paper>
+                )}
             </Box>
 
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 3, flexWrap: 'wrap', justifyContent: 'space-between' }}>
@@ -239,6 +402,18 @@ const SearchInput = memo(({
                         />
                     }
                     label="Only in stock"
+                />
+
+                {/* Re-rank (LTR) Toggle */}
+                <FormControlLabel
+                    control={
+                        <Switch
+                            checked={Boolean(ltr)}
+                            onChange={(e) => setLtr(e.target.checked)}
+                            color="primary"
+                        />
+                    }
+                    label="Re-rank (LTR)"
                 />
             </Box>
         </Paper>
