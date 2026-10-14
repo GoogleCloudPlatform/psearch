@@ -8,6 +8,7 @@ import (
 
 	"google.golang.org/genai"
 	"psearch/serving-go/internal/config"
+	"psearch/serving-go/internal/models"
 )
 
 func testConfig(version string) *config.Config {
@@ -135,7 +136,7 @@ func TestConfigActiveDimension(t *testing.T) {
 
 func TestHybridSearchDetailed_ReportsMemoryFallbackMode(t *testing.T) {
 	svc := &SpannerService{config: testConfig("v2"), seedProducts: DefaultSeedProducts()}
-	out, err := svc.HybridSearchDetailed(context.Background(), "tenis", 5, 0, 0.5)
+	out, err := svc.HybridSearchDetailed(context.Background(), "tenis", 5, 0, 0.5, models.SearchFilters{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -146,3 +147,35 @@ func TestHybridSearchDetailed_ReportsMemoryFallbackMode(t *testing.T) {
 		t.Fatal("memory fallback should return seed results")
 	}
 }
+
+// catalog filters must be applied inside BOTH legs, and the row
+// projection must stay at the 8 columns scanned by spannerHybridSearch.
+func TestBuildHybridSQL_CatalogFiltersAndUnavailableLast(t *testing.T) {
+	for _, lexical := range []bool{false, true} {
+		sql := buildHybridSQL(vectorColumnV2, lexical)
+		wantLegs := 2
+		if lexical {
+			wantLegs = 1
+		}
+		if n := strings.Count(sql, "COALESCE(is_visible, TRUE)"); n != wantLegs {
+			t.Errorf("lexical=%v: visibility filter appears %d times, want %d", lexical, n, wantLegs)
+		}
+		for _, frag := range []string{"@channel", "@only_available", "unavailable_rank", "ANY_VALUE(is_available) AS is_available", "ANY_VALUE(stock) AS stock"} {
+			if !strings.Contains(sql, frag) {
+				t.Errorf("lexical=%v: SQL missing %q", lexical, frag)
+			}
+		}
+	}
+}
+
+func TestMemorySearchFilters(t *testing.T) {
+	svc := &SpannerService{config: testConfig("v1"), seedProducts: DefaultSeedProducts()}
+	out, _ := svc.HybridSearchDetailed(context.Background(), "refrigerator", 15, 0, 0.5, models.SearchFilters{Channel: "store", OnlyInStock: true})
+	for _, r := range out.Results {
+		if isUnavailable(r.Availability, r.AvailableQuantity) || !matchesChannel("store", r.Channels) {
+			t.Fatalf("filtered result %s violates filters (avail=%s channels=%v)", r.ID, r.Availability, r.Channels)
+		}
+	}
+}
+
+func emptyFilters() models.SearchFilters { return models.SearchFilters{} }

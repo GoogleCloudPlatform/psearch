@@ -30,6 +30,8 @@ func SetupRouter(router *gin.Engine, cfg *config.Config) {
 	router.GET("/healthz", controller.HealthCheck)
 	router.GET("/api/health", controller.HealthCheck)
 	router.GET("/api/info", controller.Info)
+	router.GET("/api/config/embedding-version", controller.GetEmbeddingVersion)
+	router.POST("/api/config/embedding-version", controller.SetEmbeddingVersion)
 	router.GET("/search", controller.Search)
 	router.POST("/search", controller.Search)
 	router.GET("/api/search", controller.Search)
@@ -80,6 +82,9 @@ const defaultStorefrontHTML = `<!DOCTYPE html>
     .stock-in { color: var(--green); font-size: 12px; font-weight: 600; }
     .stock-out { color: #f87171; font-size: 12px; font-weight: 600; }
     .scores { font-family: monospace; font-size: 11px; color: var(--muted); background: #0f172a; padding: 6px 8px; border-radius: 6px; }
+    select { padding: 10px 14px; border-radius: 8px; border: 1px solid #475569; background: #0f172a; color: #fff; font-size: 14px; }
+    .checkbox-wrap { display: flex; align-items: center; gap: 6px; font-size: 14px; color: var(--muted); cursor: pointer; user-select: none; }
+    input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
   </style>
 </head>
 <body>
@@ -91,6 +96,7 @@ const defaultStorefrontHTML = `<!DOCTYPE html>
     <div style="display:flex;gap:8px;align-items:center;">
       <span class="badge" data-testid="repo-badge">Repo: GoogleCloudPlatform/psearch</span>
       <span class="badge" id="backend-badge">Spanner</span>
+      <span class="badge" id="retrieval-badge">Retrieval: -</span>
     </div>
   </header>
   <main>
@@ -101,6 +107,15 @@ const defaultStorefrontHTML = `<!DOCTYPE html>
         <input type="range" id="alpha" min="0" max="1" step="0.1" value="0.5" oninput="document.getElementById('alpha-val').textContent=this.value" />
         <span>Vector (1.0) · α=<strong id="alpha-val">0.5</strong></span>
       </div>
+      <select id="channel">
+        <option value="">All Channels</option>
+        <option value="web">web</option>
+        <option value="mobile">mobile</option>
+        <option value="store">store</option>
+      </select>
+      <label class="checkbox-wrap">
+        <input type="checkbox" id="only_in_stock" /> Only in stock
+      </label>
       <button onclick="runSearch()">Search</button>
     </div>
     <div class="meta" id="meta">Loading catalog...</div>
@@ -110,21 +125,42 @@ const defaultStorefrontHTML = `<!DOCTYPE html>
     async function runSearch() {
       const q = document.getElementById('q').value;
       const alpha = document.getElementById('alpha').value;
-      const res = await fetch('/api/search?q=' + encodeURIComponent(q) + '&alpha=' + encodeURIComponent(alpha));
+      const channel = document.getElementById('channel').value;
+      const onlyInStock = document.getElementById('only_in_stock').checked;
+      let url = '/api/search?q=' + encodeURIComponent(q) + '&alpha=' + encodeURIComponent(alpha);
+      if (channel) {
+        url += '&channel=' + encodeURIComponent(channel);
+      }
+      if (onlyInStock) {
+        url += '&only_in_stock=true';
+      }
+      const res = await fetch(url);
       const data = await res.json();
       document.getElementById('backend-badge').textContent = 'Backend: ' + (data.backend_mode || 'spanner');
+      if (document.getElementById('retrieval-badge')) {
+        document.getElementById('retrieval-badge').textContent = 'Mode: ' + (data.retrieval_mode || 'hybrid');
+      }
       document.getElementById('meta').textContent =
-        'Found ' + data.total_found + ' products in ' + (data.latency_ms || 0).toFixed(2) + ' ms (effective_alpha=' + data.effective_alpha + ')';
+        'Found ' + data.total_found + ' products in ' + (data.latency_ms || 0).toFixed(2) + ' ms (effective_alpha=' + (data.effective_alpha !== undefined ? data.effective_alpha : alpha) + ', retrieval_mode=' + (data.retrieval_mode || 'n/a') + ')';
       const container = document.getElementById('results');
       container.innerHTML = (data.results || []).map(p => {
         const s = p.score || {};
-        const stockClass = p.availability === 'IN_STOCK' ? 'stock-in' : 'stock-out';
+        const isStockIn = p.availability === 'IN_STOCK';
+        const stockClass = isStockIn ? 'stock-in' : 'stock-out';
+        const stockBadge = isStockIn
+          ? (p.availableQuantity !== undefined && p.availableQuantity !== null
+              ? 'IN_STOCK (' + p.availableQuantity + ' unid.)'
+              : 'IN_STOCK')
+          : 'OUT_OF_STOCK';
+        const finalScore = s.final_score !== undefined ? s.final_score : (s.hybrid !== undefined ? s.hybrid : 0);
+        const vecScore = s.vector !== undefined ? s.vector : 0;
+        const txtScore = s.text !== undefined ? s.text : 0;
         return '<div class="card">' +
-          '<div style="display:flex;justify-content:space-between;"><span class="' + stockClass + '">' + p.availability + '</span><span style="color:#94a3b8;font-size:12px;">' + (p.categories || []).join(', ') + '</span></div>' +
+          '<div style="display:flex;justify-content:space-between;"><span class="' + stockClass + '">' + stockBadge + '</span><span style="color:#94a3b8;font-size:12px;">' + (p.categories || []).join(', ') + '</span></div>' +
           '<h3>' + p.title + '</h3>' +
           '<div style="color:#94a3b8;font-size:13px;">' + (p.description || '') + '</div>' +
           '<div class="price">$' + ((p.priceInfo && p.priceInfo.price) || '0.00') + '</div>' +
-          '<div class="scores">hybrid=' + (s.hybrid || 0).toFixed(4) + ' | vec=' + (s.vector || 0).toFixed(4) + ' | txt=' + (s.text || 0).toFixed(4) + '</div>' +
+          '<div class="scores">hybrid=' + finalScore.toFixed(4) + ' | vec=' + vecScore.toFixed(4) + ' | txt=' + txtScore.toFixed(4) + '</div>' +
         '</div>';
       }).join('');
     }

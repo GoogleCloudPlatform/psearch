@@ -841,11 +841,21 @@ function ProductDetails() {
                                                     Availability
                                                 </TableCell>
                                                 <TableCell>
-                                                    <Chip
-                                                        label={product.availability === 'IN_STOCK' ? 'In Stock' : 'Out of Stock'}
-                                                        color={product.availability === 'IN_STOCK' ? 'success' : 'error'}
-                                                        size="small"
-                                                    />
+                                                    {(() => {
+                                                        const isStockIn = product.availability === 'IN_STOCK';
+                                                        const stockBadge = isStockIn
+                                                            ? (product.availableQuantity !== undefined && product.availableQuantity !== null
+                                                                ? `IN_STOCK (${product.availableQuantity} unid.)`
+                                                                : 'IN_STOCK')
+                                                            : 'OUT_OF_STOCK';
+                                                        return (
+                                                            <Chip
+                                                                label={stockBadge}
+                                                                color={isStockIn ? 'success' : 'error'}
+                                                                size="small"
+                                                            />
+                                                        );
+                                                    })()}
                                                 </TableCell>
                                             </TableRow>
                                         </TableBody>
