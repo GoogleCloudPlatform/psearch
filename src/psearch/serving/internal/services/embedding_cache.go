@@ -48,6 +48,7 @@ type EmbeddingCache struct {
 	index map[string]*list.Element
 
 	memoryHits, spannerHits, misses atomic.Int64
+	warm                            atomic.Bool // a store read has succeeded on this instance
 	pendingWrites                   sync.WaitGroup
 }
 
@@ -90,9 +91,16 @@ func (c *EmbeddingCache) EmbedQueryWithMeta(ctx context.Context, text string) ([
 		return vec, true, nil
 	}
 	if c.store != nil {
-		sctx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+		budget := 200 * time.Millisecond
+		if !c.warm.Load() {
+			budget = 1500 * time.Millisecond // first read on a new instance also creates a Spanner session
+		}
+		sctx, cancel := context.WithTimeout(ctx, budget)
 		vec, ok, err := c.store.Get(sctx, key, c.model)
 		cancel()
+		if err == nil {
+			c.warm.Store(true)
+		}
 		if err != nil {
 			log.Printf("WARN: embedding cache store read failed (treated as miss): %v", err)
 		} else if ok && len(vec) == c.dims {

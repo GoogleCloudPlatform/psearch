@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   Box,
   Button,
@@ -25,6 +25,8 @@ import {
   DialogContent,
   DialogTitle,
   FormControl,
+  FormControlLabel,
+  Switch,
   Grid,
   IconButton,
   InputLabel,
@@ -33,7 +35,6 @@ import {
   TextField,
   Typography,
   Alert,
-  Snackbar,
   CircularProgress,
   Chip,
 } from '@mui/material';
@@ -41,18 +42,16 @@ import { LoadingButton } from '@mui/lab';
 import DeleteIcon from '@mui/icons-material/Delete';
 import EditIcon from '@mui/icons-material/Edit';
 import { ruleService } from '../services/ruleService';
-import config from '../config';
 
 const RULE_TYPES = {
   BOOST: 'boost',
-  BURY: 'bury'
+  BURY: 'bury',
 };
 
 const CONDITION_TYPES = {
   CATEGORY: 'category',
   BRAND: 'brand',
-  PRICE_RANGE: 'price_range',
-  PRODUCT_ID: 'product_id'
+  PRODUCT_ID: 'product_id',
 };
 
 export default function RuleManager() {
@@ -62,54 +61,98 @@ export default function RuleManager() {
   const [editingRule, setEditingRule] = useState(null);
   const [error, setError] = useState(null);
   const [apiHealth, setApiHealth] = useState(null);
+
+  // Admin token stored ONLY in sessionStorage (never localStorage, never logged)
+  const [adminToken, setAdminToken] = useState(() => {
+    try {
+      return sessionStorage.getItem('psearch_admin_token') || '';
+    } catch {
+      return '';
+    }
+  });
+
+  const handleAdminTokenChange = (e) => {
+    const val = e.target.value;
+    setAdminToken(val);
+    try {
+      sessionStorage.setItem('psearch_admin_token', val);
+    } catch {}
+  };
+
   const [currentRule, setCurrentRule] = useState({
+    name: '',
     type: RULE_TYPES.BOOST,
     conditionType: CONDITION_TYPES.CATEGORY,
     condition: '',
     score: 1.0,
+    query_pattern: '',
+    tenant_id: 'default',
+    active: true,
   });
 
-  const checkApiHealth = async () => {
+  const checkApiHealth = useCallback(async () => {
     try {
       const health = await ruleService.checkHealth();
       setApiHealth(health);
       setError(null);
-    } catch (error) {
+    } catch {
       setApiHealth(null);
-      setError(`API Connection Error: Mock rule service unavailable`);
+      setError('API Connection Error: Rule service unavailable');
     }
-  };
+  }, []);
 
-  const fetchRules = async () => {
+  const fetchRules = useCallback(async () => {
     setLoading(true);
     try {
       const rulesList = await ruleService.getRules();
       setRules(rulesList || []);
       setError(null);
-    } catch (error) {
-      setError('Failed to fetch mock rules. Please try again.');
-      console.error('Error fetching rules:', error);
+    } catch (err) {
+      if (err.response) {
+        if (err.response.status === 403) {
+          setError('403 Forbidden: Invalid or missing admin token.');
+        } else if (err.response.status === 400) {
+          const msg = err.response.data?.error || err.response.data?.message || 'Invalid request';
+          setError(`400 Bad Request: ${msg}`);
+        } else {
+          setError(`Error (${err.response.status}): ${err.response.data?.error || err.message}`);
+        }
+      } else {
+        setError('Failed to fetch rules. Please try again.');
+      }
       setRules([]);
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
-  };
+  }, []);
 
   useEffect(() => {
     checkApiHealth();
     fetchRules();
-  }, []);
+  }, [checkApiHealth, fetchRules]);
 
   const handleOpenDialog = (rule = null) => {
     if (rule) {
       setEditingRule(rule);
-      setCurrentRule(rule);
+      setCurrentRule({
+        ...rule,
+        name: rule.name || (rule.condition ? `${rule.type} ${rule.condition}` : 'Rule'),
+        score: rule.boost_multiplier !== undefined ? rule.boost_multiplier : (rule.score || 1.0),
+        query_pattern: rule.query_pattern || '',
+        tenant_id: rule.tenant_id || 'default',
+        active: rule.active !== undefined ? rule.active : true,
+      });
     } else {
       setEditingRule(null);
       setCurrentRule({
+        name: '',
         type: RULE_TYPES.BOOST,
         conditionType: CONDITION_TYPES.CATEGORY,
         condition: '',
         score: 1.0,
+        query_pattern: '',
+        tenant_id: 'default',
+        active: true,
       });
     }
     setOpenDialog(true);
@@ -122,57 +165,75 @@ export default function RuleManager() {
   };
 
   const validateRule = (rule) => {
-    if (!rule.condition.trim()) {
-      throw new Error('Condition cannot be empty');
+    if (!rule.name || !rule.name.trim()) {
+      throw new Error('Name cannot be empty');
     }
-    if (rule.conditionType === CONDITION_TYPES.PRICE_RANGE) {
-      try {
-        const [min, max] = rule.condition.split('-').map(Number);
-        if (isNaN(min) || isNaN(max) || min >= max) {
-          throw new Error();
-        }
-      } catch {
-        throw new Error('Price range must be in format min-max (e.g., 0-100)');
+    if (!rule.condition || !rule.condition.trim()) {
+      if (!rule.query_pattern && !rule.target_category && !rule.target_brand) {
+        throw new Error('Condition cannot be empty');
       }
     }
-    if (!rule.score || rule.score <= 0) {
-      throw new Error('Score must be greater than 0');
+    const score = parseFloat(rule.score);
+    if (isNaN(score) || score < 0.1 || score > 10.0) {
+      throw new Error('Score/multiplier must be between 0.1 and 10.0');
     }
   };
 
   const handleSaveRule = async () => {
     setLoading(true);
+    setError(null);
     try {
       validateRule(currentRule);
-      
+
       if (editingRule) {
-        await ruleService.updateRule(editingRule.id, currentRule);
+        await ruleService.updateRule(editingRule.id, currentRule, adminToken);
       } else {
-        await ruleService.createRule(currentRule);
+        await ruleService.createRule(currentRule, adminToken);
       }
-      
+
       await fetchRules();
       handleCloseDialog();
-      setError(null);
-    } catch (error) {
-      setError(error.message || 'Failed to save mock rule. Please try again.');
-      console.error('Error saving rule:', error);
+    } catch (err) {
+      if (err.response) {
+        if (err.response.status === 403) {
+          setError('403 Forbidden: Invalid or missing admin token.');
+        } else if (err.response.status === 400) {
+          const msg = err.response.data?.error || err.response.data?.message || 'Invalid rule parameters';
+          setError(`400 Bad Request: ${msg}`);
+        } else {
+          setError(`Error (${err.response.status}): ${err.response.data?.error || err.message}`);
+        }
+      } else {
+        setError(err.message || 'Failed to save rule. Please try again.');
+      }
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   const handleDeleteRule = async (ruleId) => {
     if (window.confirm('Are you sure you want to delete this rule?')) {
       setLoading(true);
+      setError(null);
       try {
-        await ruleService.deleteRule(ruleId);
+        await ruleService.deleteRule(ruleId, 'default', adminToken);
         await fetchRules();
-        setError(null);
-      } catch (error) {
-        setError('Failed to delete mock rule. Please try again.');
-        console.error('Error deleting rule:', error);
+      } catch (err) {
+        if (err.response) {
+          if (err.response.status === 403) {
+            setError('403 Forbidden: Invalid or missing admin token.');
+          } else if (err.response.status === 400) {
+            const msg = err.response.data?.error || err.response.data?.message || 'Invalid request';
+            setError(`400 Bad Request: ${msg}`);
+          } else {
+            setError(`Error (${err.response.status}): ${err.response.data?.error || err.message}`);
+          }
+        } else {
+          setError(err.message || 'Failed to delete rule. Please try again.');
+        }
+      } finally {
+        setLoading(false);
       }
-      setLoading(false);
     }
   };
 
@@ -186,80 +247,125 @@ export default function RuleManager() {
 
   return (
     <Box sx={{ p: 3 }}>
-      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
+      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3, flexWrap: 'wrap', gap: 2 }}>
         <Box>
           <Typography variant="h5" sx={{ mb: 1 }}>Search Rules Management</Typography>
-          <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', flexDirection: 'column', alignItems: 'flex-start' }}>
+          <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
             {apiHealth && (
               <Chip
                 label={`Status: ${apiHealth.status}`}
-                color={apiHealth.status === 'healthy' ? 'success' : 'error'}
+                color={apiHealth.status === 'healthy' ? 'success' : 'default'}
                 size="small"
               />
             )}
-            <Typography variant="caption" color="text.secondary" sx={{ fontStyle: 'italic' }}>
-              Using mock data (Spanner implementation coming soon)
+            <Typography variant="caption" color="text.secondary">
+              Merchandising ranking boosts, pins, and buries (Cloud Spanner)
             </Typography>
           </Box>
         </Box>
-        <Button
-          variant="contained"
-          onClick={() => handleOpenDialog()}
-          disabled={loading || !apiHealth}
-        >
-          Add New Rule
-        </Button>
+        <Box sx={{ display: 'flex', gap: 2, alignItems: 'center', flexWrap: 'wrap' }}>
+          <TextField
+            type="password"
+            size="small"
+            label="Admin token"
+            id="admin-token-input"
+            inputProps={{ 'aria-label': 'Admin token' }}
+            value={adminToken}
+            onChange={handleAdminTokenChange}
+            placeholder="Enter X-Admin-Token"
+            helperText="Stored only in session"
+            sx={{ minWidth: 200 }}
+          />
+          <Button
+            variant="contained"
+            onClick={() => handleOpenDialog()}
+            disabled={loading}
+          >
+            Add New Rule
+          </Button>
+        </Box>
       </Box>
 
       {error && (
-        <Alert severity="error" sx={{ mb: 3 }}>
+        <Alert severity="error" sx={{ mb: 3 }} onClose={() => setError(null)}>
           {error}
         </Alert>
       )}
 
       <Grid container spacing={3}>
-        {rules.map((rule) => (
-          <Grid item xs={12} md={6} key={rule.id}>
-            <Card>
-              <CardContent>
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 2 }}>
-                  <Typography 
-                    variant="h6" 
-                    color={rule.type === RULE_TYPES.BOOST ? 'success.main' : 'error.main'}
-                  >
-                    {(rule.type || '').toUpperCase()}
-                  </Typography>
-                  <Box>
-                    <IconButton onClick={() => handleOpenDialog(rule)}>
-                      <EditIcon />
-                    </IconButton>
-                    <IconButton onClick={() => handleDeleteRule(rule.id)}>
-                      <DeleteIcon />
-                    </IconButton>
+        {rules.map((rule) => {
+          const isBoost = rule.type === RULE_TYPES.BOOST || (rule.boost_multiplier >= 1.0 && (!rule.bury_product_ids || rule.bury_product_ids.length === 0));
+          return (
+            <Grid item xs={12} md={6} key={rule.rule_id || rule.id}>
+              <Card variant="outlined" sx={{ borderRadius: 2 }}>
+                <CardContent>
+                  <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', mb: 1.5 }}>
+                    <Box>
+                      <Typography variant="h6" sx={{ fontWeight: 600 }}>
+                        {rule.name || rule.rule_id || rule.id}
+                      </Typography>
+                      <Box sx={{ display: 'flex', gap: 1, mt: 0.5 }}>
+                        <Chip
+                          label={isBoost ? 'BOOST' : 'BURY'}
+                          color={isBoost ? 'success' : 'error'}
+                          size="small"
+                        />
+                        <Chip
+                          label={rule.active ? 'Active' : 'Inactive'}
+                          variant="outlined"
+                          size="small"
+                          color={rule.active ? 'primary' : 'default'}
+                        />
+                      </Box>
+                    </Box>
+                    <Box>
+                      <IconButton onClick={() => handleOpenDialog(rule)} size="small" aria-label="edit rule">
+                        <EditIcon fontSize="small" />
+                      </IconButton>
+                      <IconButton onClick={() => handleDeleteRule(rule.rule_id || rule.id)} size="small" aria-label="delete rule">
+                        <DeleteIcon fontSize="small" />
+                      </IconButton>
+                    </Box>
                   </Box>
-                </Box>
-                <Typography variant="body1">
-                  Condition Type: {rule.conditionType || 'N/A'}
-                </Typography>
-                <Typography variant="body1">
-                  Condition: {rule.condition || 'N/A'}
-                </Typography>
-                <Typography variant="body1">
-                  Score: {rule.score || 'N/A'}
-                </Typography>
-              </CardContent>
-            </Card>
-          </Grid>
-        ))}
+                  <Typography variant="body2" color="text.secondary">
+                    <strong>Rule ID:</strong> {rule.rule_id || rule.id}
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    <strong>Condition Type:</strong> {rule.conditionType || 'N/A'}
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    <strong>Condition:</strong> {rule.condition || rule.target_category || rule.target_brand || 'N/A'}
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    <strong>Query Pattern:</strong> {rule.query_pattern ? `"${rule.query_pattern}"` : '(all queries)'}
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    <strong>Boost Multiplier:</strong> {rule.boost_multiplier !== undefined ? rule.boost_multiplier : rule.score}
+                  </Typography>
+                </CardContent>
+              </Card>
+            </Grid>
+          );
+        })}
       </Grid>
 
       <Dialog open={openDialog} onClose={handleCloseDialog} maxWidth="sm" fullWidth>
         <DialogTitle>{editingRule ? 'Edit Rule' : 'Create New Rule'}</DialogTitle>
         <DialogContent>
-          <Box sx={{ pt: 2 }}>
+          <Box sx={{ pt: 1 }}>
+            <TextField
+              fullWidth
+              label="Rule Name"
+              value={currentRule.name}
+              onChange={(e) => setCurrentRule({ ...currentRule, name: e.target.value })}
+              sx={{ mb: 2 }}
+              required
+            />
+
             <FormControl fullWidth sx={{ mb: 2 }}>
-              <InputLabel>Rule Type</InputLabel>
+              <InputLabel id="rule-type-label">Rule Type</InputLabel>
               <Select
+                labelId="rule-type-label"
                 value={currentRule.type}
                 label="Rule Type"
                 onChange={(e) => setCurrentRule({ ...currentRule, type: e.target.value })}
@@ -270,16 +376,16 @@ export default function RuleManager() {
             </FormControl>
 
             <FormControl fullWidth sx={{ mb: 2 }}>
-              <InputLabel>Condition Type</InputLabel>
+              <InputLabel id="condition-type-label">Condition Type</InputLabel>
               <Select
+                labelId="condition-type-label"
                 value={currentRule.conditionType}
                 label="Condition Type"
                 onChange={(e) => setCurrentRule({ ...currentRule, conditionType: e.target.value })}
               >
                 <MenuItem value={CONDITION_TYPES.CATEGORY}>Category</MenuItem>
                 <MenuItem value={CONDITION_TYPES.BRAND}>Brand</MenuItem>
-                <MenuItem value={CONDITION_TYPES.PRICE_RANGE}>Price Range</MenuItem>
-                <MenuItem value={CONDITION_TYPES.PRODUCT_ID}>Product ID</MenuItem>
+                <MenuItem value={CONDITION_TYPES.PRODUCT_ID}>Product ID (Pin/Bury)</MenuItem>
               </Select>
             </FormControl>
 
@@ -290,19 +396,41 @@ export default function RuleManager() {
               onChange={(e) => setCurrentRule({ ...currentRule, condition: e.target.value })}
               sx={{ mb: 2 }}
               helperText={
-                currentRule.conditionType === CONDITION_TYPES.PRICE_RANGE
-                  ? 'Format: min-max (e.g., 0-100)'
-                  : ''
+                currentRule.conditionType === CONDITION_TYPES.PRODUCT_ID
+                  ? 'Comma-separated product IDs to pin or bury'
+                  : 'Target category or brand name'
               }
+              required
+            />
+
+            <TextField
+              fullWidth
+              label="Query Pattern"
+              helperText="Optional query substring (leave empty or * to apply to all queries)"
+              value={currentRule.query_pattern}
+              onChange={(e) => setCurrentRule({ ...currentRule, query_pattern: e.target.value })}
+              sx={{ mb: 2 }}
             />
 
             <TextField
               fullWidth
               type="number"
-              label="Score"
+              label="Boost Multiplier (0.1 - 10)"
               value={currentRule.score}
-              onChange={(e) => setCurrentRule({ ...currentRule, score: parseFloat(e.target.value) })}
-              inputProps={{ step: 0.1, min: 0.1 }}
+              onChange={(e) => setCurrentRule({ ...currentRule, score: parseFloat(e.target.value) || 0 })}
+              inputProps={{ step: 0.1, min: 0.1, max: 10.0 }}
+              sx={{ mb: 2 }}
+            />
+
+            <FormControlLabel
+              control={
+                <Switch
+                  checked={Boolean(currentRule.active)}
+                  onChange={(e) => setCurrentRule({ ...currentRule, active: e.target.checked })}
+                  color="primary"
+                />
+              }
+              label="Active"
             />
           </Box>
         </DialogContent>

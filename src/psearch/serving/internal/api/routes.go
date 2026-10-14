@@ -32,6 +32,12 @@ func SetupRouter(router *gin.Engine, cfg *config.Config) {
 	router.GET("/api/info", controller.Info)
 	router.GET("/api/config/embedding-version", controller.GetEmbeddingVersion)
 	router.POST("/api/config/embedding-version", controller.SetEmbeddingVersion)
+	router.GET("/api/synonyms", controller.ListSynonyms)
+	router.POST("/api/synonyms", controller.UpsertSynonym)
+	router.GET("/api/rules", controller.ListRules)
+	router.POST("/api/rules", controller.CreateRule)
+	router.PUT("/api/rules/:id", controller.UpdateRule)
+	router.DELETE("/api/rules/:id", controller.DeleteRule)
 	router.GET("/search", controller.Search)
 	router.POST("/search", controller.Search)
 	router.GET("/api/search", controller.Search)
@@ -157,6 +163,7 @@ const defaultStorefrontHTML = `<!DOCTYPE html>
       </aside>
       <div style="flex:1;min-width:0;">
         <div class="meta" id="meta">Loading catalog...</div>
+        <div id="expanded-terms" style="color:var(--muted);font-size:13px;margin:-8px 0 16px 0;display:none;"></div>
         <div class="grid" id="results"></div>
       </div>
     </div>
@@ -212,6 +219,17 @@ const defaultStorefrontHTML = `<!DOCTYPE html>
       }
       document.getElementById('meta').textContent =
         'Found ' + data.total_found + ' products in ' + (data.latency_ms || 0).toFixed(2) + ' ms (effective_alpha=' + (data.effective_alpha !== undefined ? data.effective_alpha : alpha) + ', retrieval_mode=' + (data.retrieval_mode || 'n/a') + (data.tenant_id ? ', tenant=' + data.tenant_id : '') + (data.locale ? ', locale=' + data.locale : '') + (facetLat !== undefined && facetLat !== null ? ', facets=' + Number(facetLat).toFixed(1) + 'ms' : '') + ')';
+      
+      const expEl = document.getElementById('expanded-terms');
+      if (expEl) {
+        if (data.expanded_terms && data.expanded_terms.length > 0) {
+          expEl.textContent = 'Also matching: ' + data.expanded_terms.join(', ');
+          expEl.style.display = 'block';
+        } else {
+          expEl.textContent = '';
+          expEl.style.display = 'none';
+        }
+      }
       
       const facets = data.facets || {};
       const renderFacetList = (list) => {

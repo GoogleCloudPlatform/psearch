@@ -44,6 +44,10 @@ const SearchInput = memo(({
     setOnlyInStock: controlledSetOnlyInStock,
     tenantId: controlledTenantId,
     locale: controlledLocale,
+    cep: controlledCep,
+    setCep: controlledSetCep,
+    maxSla24h: controlledMaxSla24h,
+    setMaxSla24h: controlledSetMaxSla24h,
 }) => {
     const [inputValue, setInputValue] = useState('');
     const [internalAlpha, setInternalAlpha] = useState(0.5);
@@ -51,6 +55,9 @@ const SearchInput = memo(({
     const [internalOnlyInStock, setInternalOnlyInStock] = useState(false);
     const [internalTenantId] = useState('default');
     const [internalLocale] = useState('');
+    const [internalCep, setInternalCep] = useState('');
+    const [internalMaxSla24h, setInternalMaxSla24h] = useState(false);
+    const [cepError, setCepError] = useState('');
     const debounceTimerRef = useRef(null);
 
     const alpha = controlledAlpha !== undefined ? controlledAlpha : internalAlpha;
@@ -61,6 +68,10 @@ const SearchInput = memo(({
     const setOnlyInStock = controlledSetOnlyInStock || setInternalOnlyInStock;
     const tenantId = controlledTenantId !== undefined ? controlledTenantId : internalTenantId;
     const locale = controlledLocale !== undefined ? controlledLocale : internalLocale;
+    const cep = controlledCep !== undefined ? controlledCep : internalCep;
+    const setCep = controlledSetCep || setInternalCep;
+    const maxSla24h = controlledMaxSla24h !== undefined ? controlledMaxSla24h : internalMaxSla24h;
+    const setMaxSla24h = controlledSetMaxSla24h || setInternalMaxSla24h;
 
     // Local slider value for responsive dragging
     const [localAlpha, setLocalAlpha] = useState(alpha);
@@ -74,9 +85,35 @@ const SearchInput = memo(({
         setInputValue(e.target.value);
     };
 
+    const handleCepChange = (e) => {
+        const raw = e.target.value.replace(/\D/g, '').slice(0, 8);
+        let formatted = raw;
+        if (raw.length > 5) {
+            formatted = `${raw.slice(0, 5)}-${raw.slice(5)}`;
+        }
+        setCep(formatted);
+        if (raw.length > 0 && raw.length < 8) {
+            setCepError('CEP deve ter 8 dígitos');
+        } else {
+            setCepError('');
+        }
+    };
+
     // Submit search only when user explicitly requests it
     const handleSubmitSearch = () => {
-        onSearch(inputValue, { alpha: localAlpha, channel, onlyInStock, tenantId, locale });
+        const raw = (cep || '').replace(/\D/g, '');
+        if (raw.length > 0 && raw.length < 8) {
+            setCepError('CEP deve ter 8 dígitos');
+        }
+        onSearch(inputValue, {
+            alpha: localAlpha,
+            channel,
+            onlyInStock,
+            tenantId,
+            locale,
+            cep,
+            maxSla24h
+        });
     };
 
     // Handle Enter key press
@@ -165,6 +202,32 @@ const SearchInput = memo(({
                         <MenuItem value="store">store</MenuItem>
                     </Select>
                 </FormControl>
+
+                {/* CEP Input */}
+                <TextField
+                    size="small"
+                    label="Calcular Entrega"
+                    placeholder="01310-100"
+                    value={cep}
+                    onChange={handleCepChange}
+                    onKeyDown={handleKeyDown}
+                    error={Boolean(cepError)}
+                    helperText={cepError || undefined}
+                    inputProps={{ maxLength: 9 }}
+                    sx={{ minWidth: 150, maxWidth: 170 }}
+                />
+
+                {/* Full 24h Toggle */}
+                <FormControlLabel
+                    control={
+                        <Switch
+                            checked={Boolean(maxSla24h)}
+                            onChange={(e) => setMaxSla24h(e.target.checked)}
+                            color="primary"
+                        />
+                    }
+                    label="Full 24h"
+                />
 
                 {/* Only in Stock Toggle */}
                 <FormControlLabel

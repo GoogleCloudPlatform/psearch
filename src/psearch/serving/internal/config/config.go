@@ -16,13 +16,14 @@ type Config struct {
 	Region                   string
 	SpannerInstanceID        string
 	SpannerDatabaseID        string
-	GenAILocation            string // Vertex AI location for Gen AI SDK calls (Gemini 3.x / gemini-embedding-2 => "global")
-	EmbeddingModelName       string // Gemini embedding model used for the v2 vector column
-	GeminiEmbeddingDimension int    // output_dimensionality requested from the embedding model (1024)
-	EmbeddingDimension       int    // dimension of the ACTIVE vector column (v1=768 legacy, v2=GeminiEmbeddingDimension)
-	ActiveEmbeddingVersion   string // initial version from env; use ActiveVersion() at runtime
-	TextFolding              bool   // use accent-folded tokenlists (migration 014b) so "tenis" matches "Tênis"
-	AdminToken               string // guards POST /api/config/embedding-version (empty = disabled)
+	GenAILocation            string  // Vertex AI location for Gen AI SDK calls (Gemini 3.x / gemini-embedding-2 => "global")
+	EmbeddingModelName       string  // Gemini embedding model used for the v2 vector column
+	GeminiEmbeddingDimension int     // output_dimensionality requested from the embedding model (1024)
+	EmbeddingDimension       int     // dimension of the ACTIVE vector column (v1=768 legacy, v2=GeminiEmbeddingDimension)
+	ActiveEmbeddingVersion   string  // initial version from env; use ActiveVersion() at runtime
+	BoostWeight              float64 // scale of the 8-signal boost added to RRF; 0 disables
+	TextFolding              bool    // use accent-folded tokenlists (migration 014b) so "tenis" matches "Tênis"
+	AdminToken               string  // guards POST /api/config/embedding-version (empty = disabled)
 	activeVersion            atomic.Pointer[string]
 	DefaultAlpha             float64
 	DefaultLimit             int
@@ -47,6 +48,7 @@ func Load() (*Config, error) {
 		ActiveEmbeddingVersion:   getEnv("ACTIVE_EMBEDDING_VERSION", "v1"),
 		AdminToken:               os.Getenv("ADMIN_TOKEN"),
 		TextFolding:              getEnv("TEXT_FOLDING", "false") == "true",
+		BoostWeight:              0.002,
 		DefaultAlpha:             0.5,
 		DefaultLimit:             20,
 		MinScoreValue:            0.0,
@@ -61,6 +63,9 @@ func Load() (*Config, error) {
 		cfg.GeminiEmbeddingDimension = dim
 	}
 	cfg.EmbeddingDimension = cfg.ActiveDimension()
+	if w, err := strconv.ParseFloat(getEnv("BOOST_WEIGHT", "0.002"), 64); err == nil && w >= 0 && w <= 0.05 {
+		cfg.BoostWeight = w
+	}
 	if alpha, err := strconv.ParseFloat(getEnv("DEFAULT_HYBRID_ALPHA", "0.5"), 64); err == nil {
 		cfg.DefaultAlpha = alpha
 	}

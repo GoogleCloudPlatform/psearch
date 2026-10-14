@@ -299,3 +299,112 @@ func TestCatalogFiltersLocaleTenantCategoryBrand(t *testing.T) {
 		t.Fatalf("accent-insensitive 'tenis' should rank 'Tênis...' (prod-002) first at alpha=0: %s", ids(folded.Results))
 	}
 }
+
+// synonyms API (GET public, POST admin-only) and expanded_terms in search.
+func TestSynonymsEndpoints(t *testing.T) {
+	r := newTokenRouter("s3cret")
+	req := httptest.NewRequest(http.MethodGet, "/api/synonyms?locale=pt-BR", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"term":"tenis"`) {
+		t.Fatalf("GET /api/synonyms: %d %s", w.Code, w.Body.String())
+	}
+	post := func(token, body string) int {
+		req := httptest.NewRequest(http.MethodPost, "/api/synonyms", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		if token != "" {
+			req.Header.Set("X-Admin-Token", token)
+		}
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		return w.Code
+	}
+	if code := post("", `{"locale":"pt-BR","term":"bota","synonyms":["coturno"]}`); code != http.StatusForbidden {
+		t.Fatalf("POST without token = %d, want 403", code)
+	}
+	if code := post("s3cret", `{"locale":"pt-BR","term":"bota","synonyms":["coturno"],"weight":2}`); code != http.StatusBadRequest {
+		t.Fatalf("POST weight>=1 = %d, want 400", code)
+	}
+	if code := post("s3cret", `{"locale":"en-US","term":"kicks","synonyms":["sneaker","shoes"]}`); code != http.StatusOK {
+		t.Fatalf("POST valid = %d", code)
+	}
+	resp := doSearch(t, r, "q=kicks&locale=en-US")
+	if len(resp.ExpandedTerms) == 0 || len(resp.Results) == 0 {
+		t.Fatalf("search 'kicks' should expand via new synonym: terms=%v results=%d", resp.ExpandedTerms, len(resp.Results))
+	}
+}
+
+// /api/rules CRUD (GET public; writes admin-only) and applied_rules in search.
+func TestRulesCRUD(t *testing.T) {
+	r := newTokenRouter("s3cret")
+	do := func(method, path, token, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		if token != "" {
+			req.Header.Set("X-Admin-Token", token)
+		}
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		return w
+	}
+	rule := `{"name":"pin pegasus","query_pattern":"shoes","pin_product_ids":["prod-003"],"active":true}`
+	if w := do(http.MethodPost, "/api/rules", "", rule); w.Code != http.StatusForbidden {
+		t.Fatalf("POST without token = %d", w.Code)
+	}
+	w := do(http.MethodPost, "/api/rules", "s3cret", rule)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("POST = %d %s", w.Code, w.Body.String())
+	}
+	var created struct {
+		RuleID string `json:"rule_id"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &created)
+	if created.RuleID == "" {
+		t.Fatal("server must assign rule_id")
+	}
+	if w := do(http.MethodGet, "/api/rules", "", ""); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), created.RuleID) {
+		t.Fatalf("GET = %d %s", w.Code, w.Body.String())
+	}
+	resp := doSearch(t, r, "q=running+shoes&limit=5")
+	if len(resp.Results) == 0 || resp.Results[0].ID != "prod-003" || len(resp.AppliedRules) != 1 {
+		t.Fatalf("pin rule not applied: %s rules=%v", ids(resp.Results), resp.AppliedRules)
+	}
+	if w := do(http.MethodPut, "/api/rules/"+created.RuleID, "s3cret", `{"name":"off","query_pattern":"shoes","pin_product_ids":["prod-003"],"active":false}`); w.Code != http.StatusOK {
+		t.Fatalf("PUT = %d %s", w.Code, w.Body.String())
+	}
+	if resp := doSearch(t, r, "q=running+shoes&limit=5"); len(resp.AppliedRules) != 0 {
+		t.Fatal("inactive rule must not apply")
+	}
+	if w := do(http.MethodPost, "/api/rules", "s3cret", `{"name":"bad","boost_multiplier":2}`); w.Code != http.StatusBadRequest {
+		t.Fatalf("invalid rule = %d", w.Code)
+	}
+	if w := do(http.MethodDelete, "/api/rules/"+created.RuleID, "s3cret", ""); w.Code != http.StatusNoContent {
+		t.Fatalf("DELETE = %d", w.Code)
+	}
+	if w := do(http.MethodGet, "/api/rules", "", ""); strings.Contains(w.Body.String(), created.RuleID) {
+		t.Fatal("rule still listed after delete")
+	}
+}
+
+// CEP + max_sla_hours filter, delivery promise on each result, invalid CEP -> 400.
+func TestDeliveryPromiseSearch(t *testing.T) {
+	r := newTestRouter()
+	resp := doSearch(t, r, "q=shoes&limit=15&cep=01310-100&max_sla_hours=24")
+	if len(resp.Results) == 0 {
+		t.Fatal("expected deliverable results for CEP 01310-100")
+	}
+	for _, res := range resp.Results {
+		if res.DeliveryPromise == nil || res.DeliveryPromise.SLAHours > 24 || res.DeliveryPromise.CEP != "01310-100" {
+			t.Fatalf("%s promise = %+v", res.ID, res.DeliveryPromise)
+		}
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/search?q=shoes&cep=123", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("invalid CEP = %d, want 400", w.Code)
+	}
+	if noCEP := doSearch(t, r, "q=shoes&limit=3"); noCEP.Results[0].DeliveryPromise != nil {
+		t.Fatal("no CEP => no delivery promise")
+	}
+}
