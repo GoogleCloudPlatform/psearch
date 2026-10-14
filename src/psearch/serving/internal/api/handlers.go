@@ -175,6 +175,8 @@ func (c *Controller) Search(ctx *gin.Context) {
 		}
 		req.PriceTable = ctx.Query("price_table_id")
 		req.SortBy = ctx.Query("sort_by")
+		req.Color = ctx.Query("color")
+		req.Size = ctx.Query("size")
 		req.SessionID = ctx.Query("session_id")
 		if v := ctx.Query("session_product_ids"); v != "" {
 			req.SessionProductIDs = strings.Split(v, ",")
@@ -238,7 +240,13 @@ func (c *Controller) Search(ctx *gin.Context) {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	if len(req.Color) > 64 || len(req.Size) > 32 {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "color must be <= 64 chars and size <= 32 chars"})
+		return
+	}
 	filters := models.SearchFilters{
+		Color:       req.Color,
+		Size:        req.Size,
 		PriceTable:  req.PriceTable,
 		SortBy:      req.SortBy,
 		MinPrice:    req.MinPrice,
@@ -296,7 +304,7 @@ intentDone:
 	// ADR-008 (Issue #21): zero-results recovery when the lexical leg found nothing.
 	var didYouMean string
 	var autoCorrected, relaxed bool
-	if err == nil && strings.TrimSpace(searchQuery) != "" && services.LexicalHits(outcome.Results) == 0 {
+	if err == nil && !services.IsBrowseQuery(searchQuery) && services.LexicalHits(outcome.Results) == 0 {
 		if corrected, changed := c.spell.Correct(ctx.Request.Context(), filters.TenantID, searchQuery); changed {
 			didYouMean = corrected
 			// The corrected token may be an entity that is only indexed as a structured

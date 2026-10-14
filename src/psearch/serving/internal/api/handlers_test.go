@@ -611,3 +611,27 @@ func TestSessionPersonalizationEndpoints(t *testing.T) {
 		t.Fatalf("list events: %d %s", w.Code, w.Body.String())
 	}
 }
+
+// Issue #32: variant filters and aggregates through the API.
+func TestVariantGroupingAPI(t *testing.T) {
+	r := newTestRouter()
+	resp := doSearch(t, r, "q=running+shoes&limit=15&color=azul&size=42")
+	if len(resp.Results) == 0 {
+		t.Fatal("expected results for azul/42")
+	}
+	for _, res := range resp.Results {
+		if res.VariantCount == 0 || len(res.AvailableColors) != 1 || res.AvailableColors[0] != "azul" {
+			t.Fatalf("%s variants=%d colors=%v", res.ID, res.VariantCount, res.AvailableColors)
+		}
+	}
+	all := doSearch(t, r, "q=shoes&limit=15")
+	if all.Facets == nil || len(all.Facets.Colors) == 0 || len(all.Facets.Sizes) == 0 {
+		t.Fatal("facets must include colors and sizes")
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/search?q=x&size="+strings.Repeat("9", 40), nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("oversized size = %d, want 400", w.Code)
+	}
+}

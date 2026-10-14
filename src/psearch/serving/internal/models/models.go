@@ -18,6 +18,8 @@ type SearchRequest struct {
 	MaxPrice          float64  `json:"max_price,omitempty" form:"max_price"`
 	ParseIntent       *bool    `json:"parse_intent,omitempty" form:"parse_intent"`
 	PriceTable        string   `json:"price_table_id,omitempty" form:"price_table_id"`
+	Color             string   `json:"color,omitempty" form:"color"`
+	Size              string   `json:"size,omitempty" form:"size"`
 	SortBy            string   `json:"sort_by,omitempty" form:"sort_by"`
 	SessionID         string   `json:"session_id,omitempty" form:"session_id"`
 	SessionProductIDs []string `json:"session_product_ids,omitempty" form:"session_product_ids"` // default true (ADR-007); false disables
@@ -35,6 +37,8 @@ type SearchFilters struct {
 	MaxSLAHours int64   // ADR-005: maximum delivery SLA in hours; 0 = any
 	RelaxText   bool    // ADR-008 (#21): run the text leg with OR between terms
 	PriceTable  string  // ADR-008 (#22): contract price table; "" = list price
+	Color       string  // ADR-009 (#32): in-stock child SKU color; "" = any
+	Size        string  // ADR-009 (#32): in-stock child SKU size; "" = any
 	SortBy      string  // ADR-008 (#22): relevance | price_asc | price_desc
 	MinPrice    float64 // ADR-007/008: minimum price (0 = none)
 	MaxPrice    float64 // ADR-007/008: maximum price (0 = none)
@@ -80,6 +84,8 @@ type Facets struct {
 	Brands       []FacetBucket `json:"brands"`
 	PriceRanges  []FacetBucket `json:"price_ranges"`
 	Availability []FacetBucket `json:"availability"`
+	Colors       []FacetBucket `json:"colors,omitempty"` // in-stock variant colors (#32)
+	Sizes        []FacetBucket `json:"sizes,omitempty"`  // in-stock variant sizes (#32)
 }
 
 type SearchResult struct {
@@ -105,6 +111,10 @@ type SearchResult struct {
 	URI               string             `json:"uri"`
 	Score             map[string]float64 `json:"score"`
 	DeliveryPromise   *DeliveryPromise   `json:"deliveryPromise,omitempty"`
+	Variants          []Variant          `json:"variants,omitempty"` // child SKUs (ADR-009, #32)
+	VariantCount      int                `json:"variant_count,omitempty"`
+	AvailableColors   []string           `json:"available_colors,omitempty"`
+	AvailableSizes    []string           `json:"available_sizes,omitempty"`
 }
 
 type DeliveryPromise struct {
@@ -175,4 +185,13 @@ type ParsedQuery struct {
 	CleanQuery       string                 `json:"clean_query"`
 	ExtractedFilters map[string]interface{} `json:"extracted_filters"`
 	IntentSource     string                 `json:"intent_source"` // parser | cache | gemini | none
+}
+
+// Variant is one child SKU of a parent product (ADR-009, Issue #32).
+type Variant struct {
+	SKUID     string `json:"sku_id"`
+	Color     string `json:"color,omitempty"`
+	Size      string `json:"size,omitempty"`
+	Stock     int64  `json:"stock"`
+	Available bool   `json:"available"`
 }

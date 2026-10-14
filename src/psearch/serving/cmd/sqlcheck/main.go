@@ -77,6 +77,8 @@ func main() {
 		{"laptop", 0.5, models.SearchFilters{PriceTable: "b2b-corporate", SortBy: "price_asc"}},           // #22 contract price + sort
 		{"shoes", 0.5, models.SearchFilters{PriceTable: "vip-club", SortBy: "price_desc", MaxPrice: 300}}, // #22 effective-price filter
 		{"macbook", 0.5, models.SearchFilters{PriceTable: "b2b-gold", MaxPrice: 1200}},                    // #22 prod-007 1147.18
+		{"running shoes", 0.5, models.SearchFilters{Color: "azul", Size: "42"}},                           // #32 variant EXISTS filters + ARRAY aggregation
+		{"laptop", 0.5, models.SearchFilters{Color: "prata"}},                                             // #32
 	}
 	failed := false
 	for _, c := range cases {
@@ -140,6 +142,22 @@ func main() {
 		log.Printf("FAIL product vectors: %v", err)
 	} else {
 		log.Printf("OK   product vectors: %d", len(v))
+	}
+	// Catalog browse (Issue #30): empty / "*" query lists the catalog with filters.
+	for _, f := range []models.SearchFilters{{}, {Locale: "pt-BR"}, {PriceTable: "b2b-gold", SortBy: "price_asc"}, {Color: "preto", Size: "40"}} {
+		if n, err := svc.CheckSpannerBrowse(ctx, f); err != nil {
+			failed = true
+			log.Printf("FAIL catalog browse %+v: %v", f, err)
+		} else {
+			log.Printf("OK   catalog browse %+v rows=%d", f, n)
+		}
+	}
+	// Variant facets (Issue #32).
+	if f, err := svc.Facets(ctx, []string{"prod-001", "prod-002", "prod-005"}, "", "default"); err != nil {
+		failed = true
+		log.Printf("FAIL variant facets: %v", err)
+	} else {
+		log.Printf("OK   variant facets colors=%v sizes=%d", f.Colors, len(f.Sizes))
 	}
 	// Facet queries (Issue #5) over the full catalog.
 	if f, err := svc.Facets(ctx, []string{"prod-001", "prod-002", "prod-004", "prod-012"}, "b2b-gold", "default"); err != nil {

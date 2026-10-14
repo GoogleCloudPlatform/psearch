@@ -122,7 +122,7 @@ const defaultStorefrontHTML = `<!DOCTYPE html>
   </header>
   <main>
     <div class="search-bar">
-      <input type="text" id="q" list="q-suggestions" value="running shoes" placeholder="Search products (e.g. running shoes, tenis corrida, laptop, geladeira)..." autocomplete="off" onkeydown="if(event.key==='Enter') runSearch()" />
+      <input type="text" id="q" list="q-suggestions" value="" placeholder="Search products (e.g. running shoes, tenis corrida, laptop, geladeira) — empty shows the full catalog" autocomplete="off" onkeydown="if(event.key==='Enter') runSearch()" />
       <datalist id="q-suggestions"></datalist>
       <div class="slider-wrap">
         <span>FTS (0.0)</span>
@@ -154,6 +154,23 @@ const defaultStorefrontHTML = `<!DOCTYPE html>
         <option value="price_asc">Menor preço</option>
         <option value="price_desc">Maior preço</option>
       </select>
+      <select id="color" title="Cor">
+        <option value="">Todas as cores</option>
+        <option value="preto">preto</option>
+        <option value="branco">branco</option>
+        <option value="azul">azul</option>
+        <option value="prata">prata</option>
+        <option value="grafite">grafite</option>
+      </select>
+      <select id="size" title="Tamanho">
+        <option value="">Todos os tamanhos</option>
+        <option value="38">38</option>
+        <option value="39">39</option>
+        <option value="40">40</option>
+        <option value="41">41</option>
+        <option value="42">42</option>
+        <option value="43">43</option>
+      </select>
       <input type="text" id="cep" placeholder="CEP (01310-100)" style="flex:0 0 130px;min-width:110px;" title="Calcular Entrega" onkeydown="if(event.key==='Enter') runSearch()" />
       <label class="checkbox-wrap">
         <input type="checkbox" id="max_sla_24h" /> 24h
@@ -168,6 +185,7 @@ const defaultStorefrontHTML = `<!DOCTYPE html>
         <input type="checkbox" id="parse_intent" checked /> Smart query
       </label>
       <button onclick="runSearch()">Search</button>
+      <button id="show-all-btn" onclick="showAllCatalog()" title="Show every product across locales">Show All Catalog</button>
     </div>
     <div style="display:flex;gap:24px;margin-top:20px;align-items:flex-start;">
       <aside id="facet-sidebar" style="width:230px;flex-shrink:0;background:var(--card);padding:16px;border-radius:12px;border:1px solid #334155;">
@@ -188,6 +206,14 @@ const defaultStorefrontHTML = `<!DOCTYPE html>
           <div class="facet-list" id="facets-price-list">-</div>
         </div>
         <div class="facet-group">
+          <div class="facet-title">Colors</div>
+          <div class="facet-list" id="facets-color-list">-</div>
+        </div>
+        <div class="facet-group">
+          <div class="facet-title">Sizes</div>
+          <div class="facet-list" id="facets-size-list">-</div>
+        </div>
+        <div class="facet-group">
           <div class="facet-title">Availability</div>
           <div class="facet-list" id="facets-avail-list">-</div>
         </div>
@@ -202,7 +228,8 @@ const defaultStorefrontHTML = `<!DOCTYPE html>
     </div>
   </main>
   <script>
-    async function runSearch() {
+    async function runSearch(opts) {
+      opts = opts || {};
       const q = document.getElementById('q').value;
       const alpha = document.getElementById('alpha').value;
       const channel = document.getElementById('channel').value;
@@ -215,8 +242,13 @@ const defaultStorefrontHTML = `<!DOCTYPE html>
       const parseIntent = document.getElementById('parse_intent') ? document.getElementById('parse_intent').checked : true;
       const priceTableId = document.getElementById('price_table_id') ? document.getElementById('price_table_id').value : '';
       const sortBy = document.getElementById('sort_by') ? document.getElementById('sort_by').value : '';
+      const color = document.getElementById('color') ? document.getElementById('color').value : '';
+      const size = document.getElementById('size') ? document.getElementById('size').value : '';
       const sessionId = document.getElementById('session_id') ? document.getElementById('session_id').value.trim() : '';
       let url = '/api/search?q=' + encodeURIComponent(q) + '&alpha=' + encodeURIComponent(alpha);
+      if (opts.browseAll || q.trim() === '' || q.trim() === '*') {
+        url += '&limit=100'; // catalog browse: show every product (#30)
+      }
       if (sessionId) {
         url += '&session_id=' + encodeURIComponent(sessionId);
       }
@@ -228,6 +260,12 @@ const defaultStorefrontHTML = `<!DOCTYPE html>
       }
       if (sortBy) {
         url += '&sort_by=' + encodeURIComponent(sortBy);
+      }
+      if (color) {
+        url += '&color=' + encodeURIComponent(color);
+      }
+      if (size) {
+        url += '&size=' + encodeURIComponent(size);
       }
       if (onlyInStock) {
         url += '&only_in_stock=true';
@@ -446,6 +484,8 @@ const defaultStorefrontHTML = `<!DOCTYPE html>
       document.getElementById('facets-cat-list').innerHTML = renderFacetList(facets.categories);
       document.getElementById('facets-brand-list').innerHTML = renderFacetList(facets.brands);
       document.getElementById('facets-price-list').innerHTML = renderFacetList(facets.price_ranges);
+      document.getElementById('facets-color-list').innerHTML = renderFacetList(facets.colors);
+      document.getElementById('facets-size-list').innerHTML = renderFacetList(facets.sizes);
       document.getElementById('facets-avail-list').innerHTML = renderFacetList(facets.availability);
       const container = document.getElementById('results');
       container.innerHTML = (data.results || []).map(p => {
@@ -469,6 +509,7 @@ const defaultStorefrontHTML = `<!DOCTYPE html>
           '<h3>' + p.title + '</h3>' +
           '<div style="color:#94a3b8;font-size:13px;">' + (p.description || '') + '</div>' +
           '<div class="price"><span class="price-val">$' + ((p.priceInfo && p.priceInfo.price) || '0.00') + '</span><span class="base-price" style="display:none;text-decoration:line-through;color:var(--muted);font-size:14px;font-weight:normal;margin-left:8px;"></span><span class="contract-badge" style="display:none;margin-left:8px;"></span></div>' +
+          '<div class="variant-chips" style="display:none;gap:4px;flex-wrap:wrap;align-items:center;"></div>' +
           '<div class="scores">hybrid=' + finalScore.toFixed(4) + ' | vec=' + vecScore.toFixed(4) + ' | txt=' + txtScore.toFixed(4) + ltrScore + '</div>' +
           '<div style="margin-top:10px;display:flex;justify-content:flex-end;"><button type="button" class="record-click-btn" style="background:#1e293b;border:1px solid #64748b;color:#f8fafc;padding:3px 8px;border-radius:4px;cursor:pointer;font-size:11px;">+ Clique</button></div>' +
         '</div>';
@@ -550,6 +591,53 @@ const defaultStorefrontHTML = `<!DOCTYPE html>
             boostEl.style.borderRadius = '4px';
           }
         }
+        const varContainer = card.querySelector('.variant-chips');
+        if (varContainer) {
+          const availColors = Array.isArray(p.available_colors) ? p.available_colors : [];
+          const availSizes = Array.isArray(p.available_sizes) ? p.available_sizes : [];
+          const varCount = typeof p.variant_count === 'number' ? p.variant_count : (Array.isArray(p.variants) ? p.variants.length : 0);
+          const shownCount = availColors.length + availSizes.length;
+          const extraVars = varCount > shownCount ? varCount - shownCount : 0;
+          if (availColors.length > 0 || availSizes.length > 0 || extraVars > 0) {
+            varContainer.style.display = 'flex';
+            availColors.forEach(function(c) {
+              const chip = document.createElement('span');
+              chip.className = 'badge';
+              chip.style.background = '#0f172a';
+              chip.style.border = '1px solid #38bdf8';
+              chip.style.color = '#e0f2fe';
+              chip.style.fontSize = '11px';
+              chip.style.padding = '2px 6px';
+              chip.style.borderRadius = '4px';
+              chip.textContent = c;
+              varContainer.appendChild(chip);
+            });
+            availSizes.forEach(function(sz) {
+              const chip = document.createElement('span');
+              chip.className = 'badge';
+              chip.style.background = '#0f172a';
+              chip.style.border = '1px solid #64748b';
+              chip.style.color = '#cbd5e1';
+              chip.style.fontSize = '11px';
+              chip.style.padding = '2px 6px';
+              chip.style.borderRadius = '4px';
+              chip.textContent = sz;
+              varContainer.appendChild(chip);
+            });
+            if (extraVars > 0) {
+              const moreChip = document.createElement('span');
+              moreChip.className = 'badge';
+              moreChip.style.background = '#1e293b';
+              moreChip.style.border = '1px solid #38bdf8';
+              moreChip.style.color = '#38bdf8';
+              moreChip.style.fontSize = '11px';
+              moreChip.style.padding = '2px 6px';
+              moreChip.style.borderRadius = '4px';
+              moreChip.textContent = '+' + extraVars + ' variantes';
+              varContainer.appendChild(moreChip);
+            }
+          }
+        }
         const recordBtn = card.querySelector('.record-click-btn');
         if (recordBtn) {
           recordBtn.textContent = '+ Clique';
@@ -607,6 +695,18 @@ const defaultStorefrontHTML = `<!DOCTYPE html>
           }
         }, 150);
       });
+    }
+    function showAllCatalog() {
+      // Browse the whole catalog across locales (empty query = catalog browse, #30).
+      document.getElementById('q').value = '';
+      const loc = document.getElementById('locale');
+      if (loc) loc.value = '';
+      const colEl = document.getElementById('color');
+      if (colEl) colEl.value = '';
+      const szEl = document.getElementById('size');
+      if (szEl) szEl.value = '';
+      runSearch({ browseAll: true });
+    }
     const sidEl = document.getElementById('session_id');
     if (sidEl && !sidEl.value) {
       let storedSid = sessionStorage.getItem('psearch_storefront_session_id');
