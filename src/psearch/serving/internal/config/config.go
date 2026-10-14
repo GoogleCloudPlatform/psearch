@@ -21,6 +21,7 @@ type Config struct {
 	GeminiEmbeddingDimension int    // output_dimensionality requested from the embedding model (ADR-001: 1024)
 	EmbeddingDimension       int    // dimension of the ACTIVE vector column (v1=768 legacy, v2=GeminiEmbeddingDimension)
 	ActiveEmbeddingVersion   string // initial version from env; use ActiveVersion() at runtime
+	TextFolding              bool   // use accent-folded tokenlists (migration 014b) so "tenis" matches "Tênis" (Issue #4)
 	AdminToken               string // guards POST /api/config/embedding-version (empty = disabled)
 	activeVersion            atomic.Pointer[string]
 	DefaultAlpha             float64
@@ -45,6 +46,7 @@ func Load() (*Config, error) {
 		GeminiEmbeddingDimension: 1024,
 		ActiveEmbeddingVersion:   getEnv("ACTIVE_EMBEDDING_VERSION", "v1"),
 		AdminToken:               os.Getenv("ADMIN_TOKEN"),
+		TextFolding:              getEnv("TEXT_FOLDING", "false") == "true",
 		DefaultAlpha:             0.5,
 		DefaultLimit:             20,
 		MinScoreValue:            0.0,

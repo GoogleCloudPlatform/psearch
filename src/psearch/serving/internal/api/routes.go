@@ -85,6 +85,11 @@ const defaultStorefrontHTML = `<!DOCTYPE html>
     select { padding: 10px 14px; border-radius: 8px; border: 1px solid #475569; background: #0f172a; color: #fff; font-size: 14px; }
     .checkbox-wrap { display: flex; align-items: center; gap: 6px; font-size: 14px; color: var(--muted); cursor: pointer; user-select: none; }
     input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
+    .facet-group { margin-bottom: 14px; }
+    .facet-title { font-size: 13px; font-weight: 600; color: #cbd5e1; margin-bottom: 6px; }
+    .facet-list { font-size: 12px; color: var(--muted); display: flex; flex-direction: column; gap: 4px; }
+    .facet-item { display: flex; justify-content: space-between; align-items: center; padding: 2px 0; }
+    .facet-count { background: #0f172a; padding: 1px 6px; border-radius: 999px; font-size: 11px; color: #cbd5e1; }
   </style>
 </head>
 <body>
@@ -97,6 +102,8 @@ const defaultStorefrontHTML = `<!DOCTYPE html>
       <span class="badge" data-testid="repo-badge">Repo: GoogleCloudPlatform/psearch</span>
       <span class="badge" id="backend-badge">Spanner</span>
       <span class="badge" id="retrieval-badge">Retrieval: -</span>
+      <span class="badge" id="tenant-badge" style="display:none;"></span>
+      <span class="badge" id="locale-badge" style="display:none;"></span>
     </div>
   </header>
   <main>
@@ -107,6 +114,13 @@ const defaultStorefrontHTML = `<!DOCTYPE html>
         <input type="range" id="alpha" min="0" max="1" step="0.1" value="0.5" oninput="document.getElementById('alpha-val').textContent=this.value" />
         <span>Vector (1.0) · α=<strong id="alpha-val">0.5</strong></span>
       </div>
+      <input type="text" id="tenant_id" value="default" placeholder="Tenant" style="flex:0 0 110px;min-width:90px;" title="Tenant ID" />
+      <select id="locale" title="Locale">
+        <option value="">All Locales</option>
+        <option value="pt-BR">pt-BR</option>
+        <option value="en-US">en-US</option>
+        <option value="es-MX">es-MX</option>
+      </select>
       <select id="channel">
         <option value="">All Channels</option>
         <option value="web">web</option>
@@ -118,8 +132,34 @@ const defaultStorefrontHTML = `<!DOCTYPE html>
       </label>
       <button onclick="runSearch()">Search</button>
     </div>
-    <div class="meta" id="meta">Loading catalog...</div>
-    <div class="grid" id="results"></div>
+    <div style="display:flex;gap:24px;margin-top:20px;align-items:flex-start;">
+      <aside id="facet-sidebar" style="width:230px;flex-shrink:0;background:var(--card);padding:16px;border-radius:12px;border:1px solid #334155;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+          <h3 style="margin:0;font-size:15px;color:var(--accent);">Facets</h3>
+          <span id="facets-latency" style="font-size:11px;color:var(--muted);"></span>
+        </div>
+        <div class="facet-group">
+          <div class="facet-title">Department</div>
+          <div class="facet-list" id="facets-cat-list">-</div>
+        </div>
+        <div class="facet-group">
+          <div class="facet-title">Brands</div>
+          <div class="facet-list" id="facets-brand-list">-</div>
+        </div>
+        <div class="facet-group">
+          <div class="facet-title">Price Ranges</div>
+          <div class="facet-list" id="facets-price-list">-</div>
+        </div>
+        <div class="facet-group">
+          <div class="facet-title">Availability</div>
+          <div class="facet-list" id="facets-avail-list">-</div>
+        </div>
+      </aside>
+      <div style="flex:1;min-width:0;">
+        <div class="meta" id="meta">Loading catalog...</div>
+        <div class="grid" id="results"></div>
+      </div>
+    </div>
   </main>
   <script>
     async function runSearch() {
@@ -127,6 +167,8 @@ const defaultStorefrontHTML = `<!DOCTYPE html>
       const alpha = document.getElementById('alpha').value;
       const channel = document.getElementById('channel').value;
       const onlyInStock = document.getElementById('only_in_stock').checked;
+      const tenantId = document.getElementById('tenant_id') ? document.getElementById('tenant_id').value : 'default';
+      const locale = document.getElementById('locale') ? document.getElementById('locale').value : '';
       let url = '/api/search?q=' + encodeURIComponent(q) + '&alpha=' + encodeURIComponent(alpha);
       if (channel) {
         url += '&channel=' + encodeURIComponent(channel);
@@ -134,14 +176,56 @@ const defaultStorefrontHTML = `<!DOCTYPE html>
       if (onlyInStock) {
         url += '&only_in_stock=true';
       }
+      if (tenantId) {
+        url += '&tenant_id=' + encodeURIComponent(tenantId);
+      }
+      if (locale) {
+        url += '&locale=' + encodeURIComponent(locale);
+      }
       const res = await fetch(url);
       const data = await res.json();
       document.getElementById('backend-badge').textContent = 'Backend: ' + (data.backend_mode || 'spanner');
       if (document.getElementById('retrieval-badge')) {
         document.getElementById('retrieval-badge').textContent = 'Mode: ' + (data.retrieval_mode || 'hybrid');
       }
+      if (document.getElementById('tenant-badge')) {
+        if (data.tenant_id) {
+          document.getElementById('tenant-badge').textContent = 'Tenant: ' + data.tenant_id;
+          document.getElementById('tenant-badge').style.display = 'inline-block';
+        } else {
+          document.getElementById('tenant-badge').style.display = 'none';
+        }
+      }
+      if (document.getElementById('locale-badge')) {
+        if (data.locale) {
+          document.getElementById('locale-badge').textContent = 'Locale: ' + data.locale;
+          document.getElementById('locale-badge').style.display = 'inline-block';
+        } else {
+          document.getElementById('locale-badge').style.display = 'none';
+        }
+      }
+      const facetLat = data.facets_latency_ms !== undefined ? data.facets_latency_ms : (data.facets && data.facets.latency_ms);
+      if (facetLat !== undefined && facetLat !== null) {
+        document.getElementById('facets-latency').textContent = Number(facetLat).toFixed(1) + 'ms';
+      } else {
+        document.getElementById('facets-latency').textContent = '';
+      }
       document.getElementById('meta').textContent =
-        'Found ' + data.total_found + ' products in ' + (data.latency_ms || 0).toFixed(2) + ' ms (effective_alpha=' + (data.effective_alpha !== undefined ? data.effective_alpha : alpha) + ', retrieval_mode=' + (data.retrieval_mode || 'n/a') + ')';
+        'Found ' + data.total_found + ' products in ' + (data.latency_ms || 0).toFixed(2) + ' ms (effective_alpha=' + (data.effective_alpha !== undefined ? data.effective_alpha : alpha) + ', retrieval_mode=' + (data.retrieval_mode || 'n/a') + (data.tenant_id ? ', tenant=' + data.tenant_id : '') + (data.locale ? ', locale=' + data.locale : '') + (facetLat !== undefined && facetLat !== null ? ', facets=' + Number(facetLat).toFixed(1) + 'ms' : '') + ')';
+      
+      const facets = data.facets || {};
+      const renderFacetList = (list) => {
+        if (!list || !list.length) return '<span style="color:#64748b;font-size:11px;">(none)</span>';
+        return list.map(item => {
+          const val = typeof item === 'object' ? item.value : item;
+          const cnt = typeof item === 'object' ? item.count : 0;
+          return '<div class="facet-item"><span>' + val + '</span><span class="facet-count">' + cnt + '</span></div>';
+        }).join('');
+      };
+      document.getElementById('facets-cat-list').innerHTML = renderFacetList(facets.categories);
+      document.getElementById('facets-brand-list').innerHTML = renderFacetList(facets.brands);
+      document.getElementById('facets-price-list').innerHTML = renderFacetList(facets.price_ranges);
+      document.getElementById('facets-avail-list').innerHTML = renderFacetList(facets.availability);
       const container = document.getElementById('results');
       container.innerHTML = (data.results || []).map(p => {
         const s = p.score || {};
@@ -152,11 +236,14 @@ const defaultStorefrontHTML = `<!DOCTYPE html>
               ? 'IN_STOCK (' + p.availableQuantity + ' unid.)'
               : 'IN_STOCK')
           : 'OUT_OF_STOCK';
+        const locBadge = p.locale
+          ? '<span class="badge" style="background:#1e293b;border:1px solid #38bdf8;color:#38bdf8;font-size:11px;padding:2px 6px;">' + p.locale + '</span>'
+          : '';
         const finalScore = s.final_score !== undefined ? s.final_score : (s.hybrid !== undefined ? s.hybrid : 0);
         const vecScore = s.vector !== undefined ? s.vector : 0;
         const txtScore = s.text !== undefined ? s.text : 0;
         return '<div class="card">' +
-          '<div style="display:flex;justify-content:space-between;"><span class="' + stockClass + '">' + stockBadge + '</span><span style="color:#94a3b8;font-size:12px;">' + (p.categories || []).join(', ') + '</span></div>' +
+          '<div style="display:flex;justify-content:space-between;align-items:center;"><div style="display:flex;gap:6px;align-items:center;"><span class="' + stockClass + '">' + stockBadge + '</span>' + locBadge + '</div><span style="color:#94a3b8;font-size:12px;">' + (p.categories || []).join(', ') + '</span></div>' +
           '<h3>' + p.title + '</h3>' +
           '<div style="color:#94a3b8;font-size:13px;">' + (p.description || '') + '</div>' +
           '<div class="price">$' + ((p.priceInfo && p.priceInfo.price) || '0.00') + '</div>' +

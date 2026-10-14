@@ -15,25 +15,43 @@ type SearchRequest struct {
 	LTR         bool     `json:"ltr,omitempty" form:"ltr"`
 }
 
-// SearchFilters are the catalog filters applied server-side (ADR-002, Issue #3).
+// SearchFilters are the catalog filters applied server-side (ADR-002, Issues #3/#4/#5).
 type SearchFilters struct {
 	OnlyInStock bool
 	Channel     string
+	Category    string // exact (case-insensitive) category match; empty = all (Issue #5 facet drill-down)
+	Brand       string // exact (case-insensitive) brand match; empty = all
+	TenantID    string // ADR-002 / Issue #4; empty = "default"
+	Locale      string // ADR-002 / Issue #4 (pt-BR, en-US, es-MX); empty = all locales
 }
 
 type SearchResponse struct {
-	Query          string                 `json:"query"`
-	EffectiveAlpha float64                `json:"effective_alpha"`
-	Results        []SearchResult         `json:"results"`
-	TotalFound     int                    `json:"total_found"`
-	Facets         map[string]interface{} `json:"facets,omitempty"`
-	LatencyMs      float64                `json:"latency_ms"`
-	BackendMode    string                 `json:"backend_mode"`
-	// EmbeddingVersion is the active vector column (v1 / v2); RetrievalMode is the path
-	// that actually served this query (hybrid_v1, hybrid_v2, lexical_only_degraded, memory_fallback).
-	EmbeddingVersion string `json:"embedding_version,omitempty"`
-	RetrievalMode    string `json:"retrieval_mode,omitempty"`
-	CacheHit         bool   `json:"cache_hit,omitempty"` // query embedding served from embedding_cache (Issue #2)
+	Query            string         `json:"query"`
+	EffectiveAlpha   float64        `json:"effective_alpha"`
+	Results          []SearchResult `json:"results"`
+	TotalFound       int            `json:"total_found"`
+	Facets           *Facets        `json:"facets,omitempty"`
+	LatencyMs        float64        `json:"latency_ms"`
+	BackendMode      string         `json:"backend_mode"`
+	EmbeddingVersion string         `json:"embedding_version,omitempty"`
+	RetrievalMode    string         `json:"retrieval_mode,omitempty"`
+	CacheHit         bool           `json:"cache_hit,omitempty"`
+	FacetsLatencyMs  float64        `json:"facets_latency_ms,omitempty"`
+	Candidates       int            `json:"candidates,omitempty"` // size of the facet candidate set (top 100)
+	TenantID         string         `json:"tenant_id,omitempty"`  // effective tenant (ADR-002)
+	Locale           string         `json:"locale,omitempty"`     // locale filter applied ("" = all)
+}
+
+type FacetBucket struct {
+	Value string `json:"value"`
+	Count int64  `json:"count"`
+}
+
+type Facets struct {
+	Categories   []FacetBucket `json:"categories"`
+	Brands       []FacetBucket `json:"brands"`
+	PriceRanges  []FacetBucket `json:"price_ranges"`
+	Availability []FacetBucket `json:"availability"`
 }
 
 type SearchResult struct {
