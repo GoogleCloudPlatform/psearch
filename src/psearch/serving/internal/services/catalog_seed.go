@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"hash/fnv"
 	"math"
 	"strings"
 
@@ -144,8 +145,28 @@ func DefaultSeedProducts() []models.SearchResult {
 			Images: []models.Image{
 				{Height: "400", Width: "400", URI: fmt.Sprintf("https://picsum.photos/seed/%s/400/400", it.id)},
 			},
-			Score: map[string]float64{},
+			Score:   map[string]float64{},
+			Signals: seedSignals(it.id),
 		})
 	}
 	return out
+}
+
+// seedSignals returns deterministic demo values for the 8 ADR-004 boost signals
+// (mirrored by migration 016b for the Spanner catalog).
+func seedSignals(id string) *models.BoostSignals {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(id))
+	n := h.Sum32()
+	pick := func(shift uint) float64 { return float64((n>>shift)%100) / 100 } // [0, 0.99]
+	return &models.BoostSignals{
+		Clicks:          int64(50 + n%950),
+		Orders:          int64(5 + (n>>4)%95),
+		DiscountPct:     float64((n >> 8) % 40),
+		PopularityScore: pick(12),
+		MarginPct:       float64(10 + (n>>16)%40),
+		CTR:             0.01 + pick(20)*0.2,
+		ConversionRate:  0.005 + pick(24)*0.1,
+		RecencyScore:    pick(28),
+	}
 }
