@@ -40,7 +40,7 @@ class MarketingService:
             project=project_id,
             location=location,
         )
-        self.model = os.environ.get("GEMINI_TEXT_MODEL", "gemini-3.5-flash")
+        self.model = os.environ.get("GEMINI_TEXT_MODEL", "gemini-3.8-flash")
 
     def generate_content(
         self,

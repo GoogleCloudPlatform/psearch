@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"sort"
+	"strings"
 
 	"cloud.google.com/go/spanner"
 	"golang.org/x/sync/errgroup"
@@ -14,14 +15,22 @@ import (
 const (
 	facetCategorySQL     = `IFNULL(category, '')`
 	facetBrandSQL        = `IFNULL(brand, '')`
-	facetPriceSQL        = `CASE WHEN price IS NULL OR price < 100 THEN '0-100' WHEN price < 500 THEN '100-500' WHEN price < 1500 THEN '500-1500' ELSE '1500+' END`
+	facetPriceTmpl       = `CASE WHEN EFF IS NULL OR EFF < 100 THEN '0-100' WHEN EFF < 500 THEN '100-500' WHEN EFF < 1500 THEN '500-1500' ELSE '1500+' END`
 	facetAvailabilitySQL = `IF(IFNULL(is_available, TRUE) AND IFNULL(stock, 1) > 0, 'IN_STOCK', 'OUT_OF_STOCK')`
 )
 
 // Facets aggregates categorical, price-range and availability counts over the
 // candidate product IDs. In Spanner mode the four GROUP BY queries run
 // concurrently (errgroup); in memory mode the same buckets are computed in Go.
-func (s *SpannerService) Facets(ctx context.Context, ids []string) (*models.Facets, error) {
+// facetPriceSQL buckets the buyer's effective (contract) price.
+var facetPriceSQL = strings.ReplaceAll(facetPriceTmpl, "EFF", effectivePriceSQL("products"))
+
+// Facets aggregates over the candidate IDs; priceTable/tenant select the
+// contract price used for price_ranges (empty = list price).
+func (s *SpannerService) Facets(ctx context.Context, ids []string, priceTable, tenant string) (*models.Facets, error) {
+	if tenant == "" {
+		tenant = "default"
+	}
 	f := &models.Facets{
 		Categories: []models.FacetBucket{}, Brands: []models.FacetBucket{},
 		PriceRanges: []models.FacetBucket{}, Availability: []models.FacetBucket{},
@@ -30,13 +39,22 @@ func (s *SpannerService) Facets(ctx context.Context, ids []string) (*models.Face
 		return f, nil
 	}
 	if s.client == nil {
-		return s.memoryFacets(ids), nil
+		return s.memoryFacets(ids, priceTable), nil
 	}
 	g, gctx := errgroup.WithContext(ctx)
-	g.Go(func() (err error) { f.Categories, err = s.queryFacet(gctx, facetCategorySQL, ids); return })
-	g.Go(func() (err error) { f.Brands, err = s.queryFacet(gctx, facetBrandSQL, ids); return })
-	g.Go(func() (err error) { f.PriceRanges, err = s.queryFacet(gctx, facetPriceSQL, ids); return })
-	g.Go(func() (err error) { f.Availability, err = s.queryFacet(gctx, facetAvailabilitySQL, ids); return })
+	g.Go(func() (err error) {
+		f.Categories, err = s.queryFacet(gctx, facetCategorySQL, ids, priceTable, tenant)
+		return
+	})
+	g.Go(func() (err error) { f.Brands, err = s.queryFacet(gctx, facetBrandSQL, ids, priceTable, tenant); return })
+	g.Go(func() (err error) {
+		f.PriceRanges, err = s.queryFacet(gctx, facetPriceSQL, ids, priceTable, tenant)
+		return
+	})
+	g.Go(func() (err error) {
+		f.Availability, err = s.queryFacet(gctx, facetAvailabilitySQL, ids, priceTable, tenant)
+		return
+	})
 	if err := g.Wait(); err != nil {
 		return nil, err
 	}
@@ -52,8 +70,12 @@ func facetSQL(expr string) string {
 		ORDER BY count DESC, value`
 }
 
-func (s *SpannerService) queryFacet(ctx context.Context, expr string, ids []string) ([]models.FacetBucket, error) {
-	iter := s.client.Single().Query(ctx, spanner.Statement{SQL: facetSQL(expr), Params: map[string]interface{}{"ids": ids}})
+func (s *SpannerService) queryFacet(ctx context.Context, expr string, ids []string, priceTable, tenant string) ([]models.FacetBucket, error) {
+	params := map[string]interface{}{"ids": ids}
+	if strings.Contains(expr, "@price_table") {
+		params["price_table"], params["tenant_id"] = priceTable, tenant
+	}
+	iter := s.client.Single().Query(ctx, spanner.Statement{SQL: facetSQL(expr), Params: params})
 	defer iter.Stop()
 	out := []models.FacetBucket{}
 	for {
@@ -76,7 +98,8 @@ func (s *SpannerService) queryFacet(ctx context.Context, expr string, ids []stri
 	}
 }
 
-func (s *SpannerService) memoryFacets(ids []string) *models.Facets {
+func (s *SpannerService) memoryFacets(ids []string, priceTable string) *models.Facets {
+	pricing := s.memPricing()
 	want := make(map[string]bool, len(ids))
 	for _, id := range ids {
 		want[id] = true
@@ -92,7 +115,7 @@ func (s *SpannerService) memoryFacets(ids []string) *models.Facets {
 		if len(p.Brands) > 0 {
 			brands[p.Brands[0]]++
 		}
-		prices[PriceBucket(p.PriceInfo.NumericPrice)]++
+		prices[PriceBucket(pricing.effective(priceTable, p.ID, p.PriceInfo.NumericPrice))]++
 		if isUnavailable(p.Availability, p.AvailableQuantity) {
 			avail["OUT_OF_STOCK"]++
 		} else {

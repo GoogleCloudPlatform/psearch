@@ -42,6 +42,7 @@ import {
     generateMarketingContent,
     generateEnhancedImage
 } from '../services/genAiService';
+import { recordSessionEvent } from '../services/sessionService';
 const API_URL = config.apiUrl;
 
 // Helper functions to extract attribute values
@@ -111,6 +112,24 @@ function ProductDetails() {
 
     // State for image enhancer dialog
     const [imageEnhancerOpen, setImageEnhancerOpen] = useState(false);
+
+    useEffect(() => {
+        if (productId) {
+            recordSessionEvent(productId, 'click');
+        }
+    }, [productId]);
+
+    const handlePurchase = async () => {
+        if (!productId) return;
+        const res = await recordSessionEvent(productId, 'purchase');
+        if (res) {
+            setNotification({
+                open: true,
+                message: `Compra realizada com sucesso! Evento 'purchase' registrado para ${productId}.`,
+                severity: 'success'
+            });
+        }
+    };
 
     useEffect(() => {
         setLoading(true);
@@ -669,6 +688,17 @@ function ProductDetails() {
                                     <SecurityIcon color="primary" sx={{ mr: 1 }} />
                                     <Typography>12-Month Warranty</Typography>
                                 </Box>
+
+                                <Button
+                                    variant="contained"
+                                    color="primary"
+                                    fullWidth
+                                    size="large"
+                                    onClick={handlePurchase}
+                                    sx={{ mt: 3, py: 1.25, fontWeight: 600, fontSize: '1rem' }}
+                                >
+                                    Comprar
+                                </Button>
                             </CardContent>
                         </Card>
                     </Grid>

@@ -39,9 +39,10 @@ class SQLFixer:
         Args:
             project_id: The Google Cloud Project ID.
             location: The GCP region (e.g., us-central1).
-            model_name: Optional. The Gemini model name.
+            model_name: Optional. The Gemini model name (default: GEMINI_PRO_MODEL or gemini-4-pro).
         """
-        self.genai_client = GenAIClient(project_id, location, model_name)
+        default_model = os.environ.get("GEMINI_PRO_MODEL", "gemini-4-pro")
+        self.genai_client = GenAIClient(project_id, location, model_name or default_model)
 
     def _construct_prompt(self, sql_script: str, error_message: str) -> str:
         """Constructs the prompt for the SQL fixing task."""
@@ -200,7 +201,7 @@ CORRECTED SQL QUERY:
         """
         Attempts a simple, direct fix of the SQL script based on the error message,
         expecting direct SQL text output from the model.
-        Uses the specified model (gemini-3.5-flash by default via GenAIClient / GEMINI_MODEL).
+        Uses the specified model (gemini-4-pro by default via GenAIClient / GEMINI_PRO_MODEL).
 
         Args:
             sql_script_to_fix: The SQL script that has an error.

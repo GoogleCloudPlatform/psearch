@@ -23,8 +23,12 @@ func newTestRouter() *gin.Engine {
 		Region:                 "us-central1",
 		SpannerInstanceID:      "psearch-instance",
 		SpannerDatabaseID:      "psearch-db",
+		EmbeddingModelName:     "gemini-embedding-2",
 		EmbeddingDimension:     768,
 		ActiveEmbeddingVersion: "v1",
+		IntentLLMModel:         "gemini-3.8-flash",
+		ProLLMModel:            "gemini-4-pro",
+		GenAILocation:          "global",
 		DefaultAlpha:           0.5,
 		DefaultLimit:           10,
 		UseMemoryStore:         true,
@@ -36,13 +40,36 @@ func newTestRouter() *gin.Engine {
 func TestHealthAndInfoEndpoints(t *testing.T) {
 	r := newTestRouter()
 
-	for _, path := range []string{"/health", "/api/health", "/api/info"} {
+	for _, path := range []string{"/health", "/api/health"} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		w := httptest.NewRecorder()
 		r.ServeHTTP(w, req)
 		if w.Code != http.StatusOK {
 			t.Fatalf("GET %s status = %d, want 200", path, w.Code)
 		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/info", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /api/info status = %d, want 200", w.Code)
+	}
+	var info map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &info); err != nil {
+		t.Fatalf("unmarshal /api/info: %v", err)
+	}
+	if info["embedding_model"] != "gemini-embedding-2" {
+		t.Errorf("embedding_model = %v, want gemini-embedding-2", info["embedding_model"])
+	}
+	if info["text_model"] != "gemini-3.8-flash" {
+		t.Errorf("text_model = %v, want gemini-3.8-flash", info["text_model"])
+	}
+	if info["pro_model"] != "gemini-4-pro" {
+		t.Errorf("pro_model = %v, want gemini-4-pro", info["pro_model"])
+	}
+	if info["genai_location"] != "global" {
+		t.Errorf("genai_location = %v, want global", info["genai_location"])
 	}
 }
 
@@ -449,5 +476,138 @@ func TestLTRSearch(t *testing.T) {
 	}
 	if plain := doSearch(t, r, "q=shoes&limit=5"); plain.LTR || plain.Results[0].Score["ltr_score"] != 0 {
 		t.Fatal("ltr must be opt-in")
+	}
+}
+
+// parse_intent extracts price/brand filters and enforces them.
+func TestParseIntentSearch(t *testing.T) {
+	r := newTestRouter()
+	resp := doSearch(t, r, "q=tenis+de+corrida+ate+200+reais&parse_intent=true&limit=15")
+	if resp.ParsedQuery == nil || resp.ParsedQuery.CleanQuery != "tenis de corrida" || resp.ParsedQuery.ExtractedFilters["max_price"] != float64(200) || resp.ParsedQuery.IntentSource != "parser" {
+		t.Fatalf("parsed_query = %+v", resp.ParsedQuery)
+	}
+	if len(resp.Results) == 0 {
+		t.Fatal("expected results under 200")
+	}
+	for _, res := range resp.Results {
+		if res.PriceInfo.NumericPrice > 200 {
+			t.Fatalf("%s price %v exceeds max_price 200", res.ID, res.PriceInfo.NumericPrice)
+		}
+	}
+	brand := doSearch(t, r, "q=running+shoes+adidas+under+200&parse_intent=true")
+	if brand.ParsedQuery.ExtractedFilters["brand"] != "Adidas" || len(brand.Results) != 1 || brand.Results[0].ID != "prod-001" {
+		t.Fatalf("brand intent: %+v %s", brand.ParsedQuery, ids(brand.Results))
+	}
+	explicit := doSearch(t, r, "q=notebook+ate+100&parse_intent=true&max_price=2000")
+	if explicit.ParsedQuery.ExtractedFilters["max_price"] != float64(100) || len(explicit.Results) == 0 {
+		t.Fatal("explicit max_price must override the extracted one")
+	}
+	if off := doSearch(t, r, "q=tenis+ate+200&parse_intent=false"); off.ParsedQuery != nil {
+		t.Fatal("parse_intent=false must disable intent parsing")
+	}
+	auto := doSearch(t, r, "q=tenis+de+corrida+ate+200+reais&limit=15")
+	if auto.ParsedQuery == nil || auto.ParsedQuery.ExtractedFilters["max_price"] != float64(200) {
+		t.Fatalf("intent parsing must be on by default: %+v", auto.ParsedQuery)
+	}
+	if plain := doSearch(t, r, "q=geladeira"); plain.ParsedQuery != nil {
+		t.Fatal("queries without extractable filters keep the response unchanged")
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/search?q=x&min_price=500&max_price=100", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("min>max = %d, want 400", w.Code)
+	}
+}
+
+// typo recovery with did_you_mean / auto_corrected.
+func TestZeroResultsRecovery(t *testing.T) {
+	r := newTestRouter()
+	resp := doSearch(t, r, "q=sansung&limit=5&alpha=0")
+	if resp.DidYouMean != "samsung" || !resp.AutoCorrected || len(resp.Results) == 0 || resp.Results[0].ID != "prod-010" {
+		t.Fatalf("did_you_mean=%q auto=%v results=%s", resp.DidYouMean, resp.AutoCorrected, ids(resp.Results))
+	}
+	gel := doSearch(t, r, "q=geladera&limit=5&alpha=0")
+	if gel.DidYouMean != "geladeira" || !gel.AutoCorrected || gel.Results[0].ID != "prod-011" {
+		t.Fatalf("geladera: %q %v %s", gel.DidYouMean, gel.AutoCorrected, ids(gel.Results))
+	}
+	if ok := doSearch(t, r, "q=samsung&limit=5"); ok.DidYouMean != "" || ok.AutoCorrected || ok.QueryRelaxed {
+		t.Fatal("queries with lexical hits are untouched")
+	}
+}
+
+// a correction that resolves to a brand-only
+// entity must be accepted even when the corrected word has no title/description hit.
+func TestSpellCorrectionToBrandEntity(t *testing.T) {
+	r := newTestRouter()
+	resp := doSearch(t, r, "q=sansung&limit=5&alpha=0&parse_intent=false")
+	if resp.DidYouMean != "samsung" || !resp.AutoCorrected {
+		t.Fatalf("did_you_mean=%q auto=%v", resp.DidYouMean, resp.AutoCorrected)
+	}
+	for _, res := range resp.Results {
+		if len(res.Brands) == 0 || res.Brands[0] != "Samsung" {
+			t.Fatalf("brand entity filter not applied after correction: %s", ids(resp.Results))
+		}
+	}
+}
+
+// contract price table, price sort, validation.
+func TestContractPricingSearch(t *testing.T) {
+	r := newTestRouter()
+	resp := doSearch(t, r, "q=laptop&price_table_id=b2b-corporate&sort_by=price_asc&limit=15")
+	if resp.PriceTableID != "b2b-corporate" || resp.SortBy != "price_asc" || len(resp.Results) == 0 {
+		t.Fatalf("pricing response: table=%q sort=%q n=%d", resp.PriceTableID, resp.SortBy, len(resp.Results))
+	}
+	r0 := resp.Results[0]
+	if r0.PriceInfo.BasePrice == 0 || r0.PriceInfo.NumericPrice >= r0.PriceInfo.BasePrice {
+		t.Fatalf("contract price must be below base: %+v", r0.PriceInfo)
+	}
+	if retail := doSearch(t, r, "q=laptop&limit=3"); retail.Results[0].PriceInfo.PriceTableID != "" {
+		t.Fatal("no price_table_id => list prices")
+	}
+	for _, bad := range []string{"q=x&sort_by=cheap", "q=x&price_table_id=Bad%20Table"} {
+		req := httptest.NewRequest(http.MethodGet, "/api/search?"+bad, nil)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("%s = %d, want 400", bad, w.Code)
+		}
+	}
+}
+
+// session events endpoint + personalized search.
+func TestSessionPersonalizationEndpoints(t *testing.T) {
+	r := newTestRouter()
+	post := func(body string) int {
+		req := httptest.NewRequest(http.MethodPost, "/api/session/events", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		return w.Code
+	}
+	if code := post(`{"session_id":"bad","product_id":"prod-001","event_type":"click"}`); code != http.StatusBadRequest {
+		t.Fatalf("invalid session = %d", code)
+	}
+	for _, id := range []string{"prod-005", "prod-007"} {
+		if code := post(`{"session_id":"sess-laptop-01","product_id":"` + id + `","event_type":"purchase"}`); code != http.StatusCreated {
+			t.Fatalf("record = %d", code)
+		}
+	}
+	plain := doSearch(t, r, "q=shoes&limit=15")
+	pers := doSearch(t, r, "q=shoes&limit=15&session_id=sess-laptop-01")
+	if !pers.Personalized || pers.SessionID != "sess-laptop-01" || plain.Personalized {
+		t.Fatalf("personalized=%v session=%q plain=%v", pers.Personalized, pers.SessionID, plain.Personalized)
+	}
+	if ids(plain.Results) == ids(pers.Results) {
+		t.Fatal("session history should change the ranking")
+	}
+	if alt := doSearch(t, r, "q=shoes&limit=15&session_product_ids=prod-003"); !alt.Personalized {
+		t.Fatal("session_product_ids should personalize without stored events")
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/session/events?session_id=sess-laptop-01", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"count":2`) {
+		t.Fatalf("list events: %d %s", w.Code, w.Body.String())
 	}
 }

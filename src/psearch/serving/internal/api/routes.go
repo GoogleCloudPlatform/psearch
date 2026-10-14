@@ -35,6 +35,8 @@ func SetupRouter(router *gin.Engine, cfg *config.Config) {
 	router.GET("/api/synonyms", controller.ListSynonyms)
 	router.POST("/api/synonyms", controller.UpsertSynonym)
 	router.GET("/api/autocomplete", controller.Autocomplete)
+	router.POST("/api/session/events", controller.RecordSessionEvent)
+	router.GET("/api/session/events", controller.ListSessionEvents)
 	router.GET("/api/rules", controller.ListRules)
 	router.POST("/api/rules", controller.CreateRule)
 	router.PUT("/api/rules/:id", controller.UpdateRule)
@@ -112,6 +114,10 @@ const defaultStorefrontHTML = `<!DOCTYPE html>
       <span class="badge" id="tenant-badge" style="display:none;"></span>
       <span class="badge" id="locale-badge" style="display:none;"></span>
       <span class="badge" id="ltr-badge" style="display:none;"></span>
+      <span class="badge" id="intent-badge" style="display:none;"></span>
+      <span class="badge" id="price-table-badge" style="display:none;"></span>
+      <span class="badge" id="sort-badge" style="display:none;"></span>
+      <span class="badge" id="personalized-badge" style="display:none;background:#3b0764;border-color:#a855f7;color:#e9d5ff;"></span>
     </div>
   </header>
   <main>
@@ -123,6 +129,7 @@ const defaultStorefrontHTML = `<!DOCTYPE html>
         <input type="range" id="alpha" min="0" max="1" step="0.1" value="0.5" oninput="document.getElementById('alpha-val').textContent=this.value" />
         <span>Vector (1.0) · α=<strong id="alpha-val">0.5</strong></span>
       </div>
+      <input type="text" id="session_id" placeholder="Session (sess-...)" style="flex:0 0 140px;min-width:120px;" title="ID da Sessão" onkeydown="if(event.key==='Enter') runSearch()" />
       <input type="text" id="tenant_id" value="default" placeholder="Tenant" style="flex:0 0 110px;min-width:90px;" title="Tenant ID" />
       <select id="locale" title="Locale">
         <option value="">All Locales</option>
@@ -136,6 +143,17 @@ const defaultStorefrontHTML = `<!DOCTYPE html>
         <option value="mobile">mobile</option>
         <option value="store">store</option>
       </select>
+      <select id="price_table_id" title="Tabela de preço">
+        <option value="">Varejo Padrão</option>
+        <option value="b2b-corporate">B2B Corporate</option>
+        <option value="b2b-gold">B2B Gold</option>
+        <option value="vip-club">VIP Club</option>
+      </select>
+      <select id="sort_by" title="Ordenar por">
+        <option value="">Relevância</option>
+        <option value="price_asc">Menor preço</option>
+        <option value="price_desc">Maior preço</option>
+      </select>
       <input type="text" id="cep" placeholder="CEP (01310-100)" style="flex:0 0 130px;min-width:110px;" title="Calcular Entrega" onkeydown="if(event.key==='Enter') runSearch()" />
       <label class="checkbox-wrap">
         <input type="checkbox" id="max_sla_24h" /> 24h
@@ -145,6 +163,9 @@ const defaultStorefrontHTML = `<!DOCTYPE html>
       </label>
       <label class="checkbox-wrap">
         <input type="checkbox" id="ltr" /> Re-rank (LTR)
+      </label>
+      <label class="checkbox-wrap">
+        <input type="checkbox" id="parse_intent" checked /> Smart query
       </label>
       <button onclick="runSearch()">Search</button>
     </div>
@@ -174,6 +195,8 @@ const defaultStorefrontHTML = `<!DOCTYPE html>
       <div style="flex:1;min-width:0;">
         <div class="meta" id="meta">Loading catalog...</div>
         <div id="expanded-terms" style="color:var(--muted);font-size:13px;margin:-8px 0 16px 0;display:none;"></div>
+        <div id="recovery-banner" style="display:none;margin:-8px 0 16px 0;padding:10px 14px;background:var(--card);border:1px solid #38bdf8;border-radius:8px;font-size:14px;color:var(--text);"></div>
+        <div id="parsed-query-chips" style="display:none;margin:-8px 0 16px 0;gap:8px;flex-wrap:wrap;align-items:center;"></div>
         <div class="grid" id="results"></div>
       </div>
     </div>
@@ -189,9 +212,22 @@ const defaultStorefrontHTML = `<!DOCTYPE html>
       const cep = document.getElementById('cep') ? document.getElementById('cep').value.trim() : '';
       const maxSla24h = document.getElementById('max_sla_24h') ? document.getElementById('max_sla_24h').checked : false;
       const ltr = document.getElementById('ltr') ? document.getElementById('ltr').checked : false;
+      const parseIntent = document.getElementById('parse_intent') ? document.getElementById('parse_intent').checked : true;
+      const priceTableId = document.getElementById('price_table_id') ? document.getElementById('price_table_id').value : '';
+      const sortBy = document.getElementById('sort_by') ? document.getElementById('sort_by').value : '';
+      const sessionId = document.getElementById('session_id') ? document.getElementById('session_id').value.trim() : '';
       let url = '/api/search?q=' + encodeURIComponent(q) + '&alpha=' + encodeURIComponent(alpha);
+      if (sessionId) {
+        url += '&session_id=' + encodeURIComponent(sessionId);
+      }
       if (channel) {
         url += '&channel=' + encodeURIComponent(channel);
+      }
+      if (priceTableId) {
+        url += '&price_table_id=' + encodeURIComponent(priceTableId);
+      }
+      if (sortBy) {
+        url += '&sort_by=' + encodeURIComponent(sortBy);
       }
       if (onlyInStock) {
         url += '&only_in_stock=true';
@@ -211,11 +247,18 @@ const defaultStorefrontHTML = `<!DOCTYPE html>
       if (ltr) {
         url += '&ltr=true';
       }
+      if (parseIntent) {
+        url += '&parse_intent=true';
+      } else {
+        url += '&parse_intent=false';
+      }
       const res = await fetch(url);
       const data = await res.json();
       if (!res.ok) {
         document.getElementById('meta').textContent = 'Error: ' + (data.error || ('Request failed with status ' + res.status));
         document.getElementById('results').innerHTML = '';
+        const banner = document.getElementById('recovery-banner');
+        if (banner) banner.style.display = 'none';
         return;
       }
       document.getElementById('backend-badge').textContent = 'Backend: ' + (data.backend_mode || 'spanner');
@@ -246,6 +289,38 @@ const defaultStorefrontHTML = `<!DOCTYPE html>
           document.getElementById('ltr-badge').style.display = 'none';
         }
       }
+      if (document.getElementById('intent-badge')) {
+        if (data.parsed_query && data.parsed_query.intent_source && data.parsed_query.intent_source !== 'none') {
+          document.getElementById('intent-badge').textContent = 'Intent: ' + data.parsed_query.intent_source;
+          document.getElementById('intent-badge').style.display = 'inline-block';
+        } else {
+          document.getElementById('intent-badge').style.display = 'none';
+        }
+      }
+      if (document.getElementById('price-table-badge')) {
+        if (data.price_table_id) {
+          document.getElementById('price-table-badge').textContent = 'Table: ' + data.price_table_id;
+          document.getElementById('price-table-badge').style.display = 'inline-block';
+        } else {
+          document.getElementById('price-table-badge').style.display = 'none';
+        }
+      }
+      if (document.getElementById('sort-badge')) {
+        if (data.sort_by) {
+          document.getElementById('sort-badge').textContent = 'Sort: ' + data.sort_by;
+          document.getElementById('sort-badge').style.display = 'inline-block';
+        } else {
+          document.getElementById('sort-badge').style.display = 'none';
+        }
+      }
+      if (document.getElementById('personalized-badge')) {
+        if (data.personalized) {
+          document.getElementById('personalized-badge').textContent = 'Personalizado';
+          document.getElementById('personalized-badge').style.display = 'inline-block';
+        } else {
+          document.getElementById('personalized-badge').style.display = 'none';
+        }
+      }
       const facetLat = data.facets_latency_ms !== undefined ? data.facets_latency_ms : (data.facets && data.facets.latency_ms);
       if (facetLat !== undefined && facetLat !== null) {
         document.getElementById('facets-latency').textContent = Number(facetLat).toFixed(1) + 'ms';
@@ -253,7 +328,7 @@ const defaultStorefrontHTML = `<!DOCTYPE html>
         document.getElementById('facets-latency').textContent = '';
       }
       document.getElementById('meta').textContent =
-        'Found ' + data.total_found + ' products in ' + (data.latency_ms || 0).toFixed(2) + ' ms (effective_alpha=' + (data.effective_alpha !== undefined ? data.effective_alpha : alpha) + ', retrieval_mode=' + (data.retrieval_mode || 'n/a') + (data.tenant_id ? ', tenant=' + data.tenant_id : '') + (data.locale ? ', locale=' + data.locale : '') + (facetLat !== undefined && facetLat !== null ? ', facets=' + Number(facetLat).toFixed(1) + 'ms' : '') + (data.ltr ? ', ltr=' + (data.ltr_model || 'active') + ' (' + (data.ltr_latency_us || 0) + 'µs)' : '') + ')';
+        'Found ' + data.total_found + ' products in ' + (data.latency_ms || 0).toFixed(2) + ' ms (effective_alpha=' + (data.effective_alpha !== undefined ? data.effective_alpha : alpha) + ', retrieval_mode=' + (data.retrieval_mode || 'n/a') + (data.tenant_id ? ', tenant=' + data.tenant_id : '') + (data.locale ? ', locale=' + data.locale : '') + (facetLat !== undefined && facetLat !== null ? ', facets=' + Number(facetLat).toFixed(1) + 'ms' : '') + (data.ltr ? ', ltr=' + (data.ltr_model || 'active') + ' (' + (data.ltr_latency_us || 0) + 'µs)' : '') + (data.parsed_query && data.parsed_query.intent_source && data.parsed_query.intent_source !== 'none' ? ', intent=' + data.parsed_query.intent_source : '') + (data.price_table_id ? ', table=' + data.price_table_id : '') + (data.sort_by ? ', sort=' + data.sort_by : '') + (data.personalized ? ', personalized=true' : '') + ')';
       
       const expEl = document.getElementById('expanded-terms');
       if (expEl) {
@@ -263,6 +338,99 @@ const defaultStorefrontHTML = `<!DOCTYPE html>
         } else {
           expEl.textContent = '';
           expEl.style.display = 'none';
+        }
+      }
+
+      const banner = document.getElementById('recovery-banner');
+      if (banner) {
+        while (banner.firstChild) banner.removeChild(banner.firstChild);
+        if (data.auto_corrected && data.did_you_mean) {
+          banner.style.display = 'block';
+          const textNode = document.createTextNode('Mostrando resultados para "' + data.did_you_mean + '". ');
+          banner.appendChild(textNode);
+          const link = document.createElement('a');
+          link.href = '#';
+          link.textContent = 'Buscar por "' + (data.query || q) + '"';
+          link.style.color = 'var(--accent)';
+          link.style.textDecoration = 'underline';
+          link.style.cursor = 'pointer';
+          link.onclick = function(e) {
+            e.preventDefault();
+            document.getElementById('q').value = data.query || q;
+            const parseCheckbox = document.getElementById('parse_intent');
+            if (parseCheckbox) parseCheckbox.checked = false;
+            runSearch();
+          };
+          banner.appendChild(link);
+        } else if (!data.auto_corrected && data.did_you_mean) {
+          banner.style.display = 'block';
+          const textNode = document.createTextNode('Você quis dizer: ');
+          banner.appendChild(textNode);
+          const link = document.createElement('a');
+          link.href = '#';
+          link.textContent = data.did_you_mean + '?';
+          link.style.color = 'var(--accent)';
+          link.style.textDecoration = 'underline';
+          link.style.cursor = 'pointer';
+          link.onclick = function(e) {
+            e.preventDefault();
+            document.getElementById('q').value = data.did_you_mean;
+            runSearch();
+          };
+          banner.appendChild(link);
+        } else if (data.query_relaxed) {
+          banner.style.display = 'block';
+          banner.textContent = 'Nenhum resultado com todos os termos — mostrando resultados com qualquer um deles';
+        } else {
+          banner.style.display = 'none';
+        }
+      }
+
+      const chipsEl = document.getElementById('parsed-query-chips');
+      if (chipsEl) {
+        while (chipsEl.firstChild) chipsEl.removeChild(chipsEl.firstChild);
+        const pq = data.parsed_query;
+        const f = (pq && pq.extracted_filters) || {};
+        const hasFilters = Object.keys(f).length > 0;
+        if (pq && (hasFilters || pq.clean_query)) {
+          chipsEl.style.display = 'flex';
+          const items = [];
+          if (pq.clean_query) {
+            items.push('Query: "' + pq.clean_query + '"');
+          }
+          if (f.min_price !== undefined && f.max_price !== undefined) {
+            items.push('Preço: ' + f.min_price + ' - ' + f.max_price);
+          } else if (f.min_price !== undefined) {
+            items.push('Preço ≥ ' + f.min_price);
+          } else if (f.max_price !== undefined) {
+            items.push('Preço ≤ ' + f.max_price);
+          }
+          if (f.brand) {
+            items.push('Marca: ' + f.brand);
+          }
+          if (f.category) {
+            items.push('Categoria: ' + f.category);
+          }
+          if (f.color) {
+            items.push('Cor: ' + f.color);
+          }
+          if (pq.intent_source && pq.intent_source !== 'none') {
+            items.push('(' + pq.intent_source + ')');
+          }
+          items.forEach(function(text) {
+            const chip = document.createElement('span');
+            chip.className = 'badge';
+            chip.style.background = '#1e293b';
+            chip.style.border = '1px solid #38bdf8';
+            chip.style.color = '#38bdf8';
+            chip.style.fontSize = '12px';
+            chip.style.padding = '4px 10px';
+            chip.style.borderRadius = '999px';
+            chip.textContent = text;
+            chipsEl.appendChild(chip);
+          });
+        } else {
+          chipsEl.style.display = 'none';
         }
       }
       
@@ -297,11 +465,12 @@ const defaultStorefrontHTML = `<!DOCTYPE html>
         const txtScore = s.text !== undefined ? s.text : 0;
         const ltrScore = s.ltr_score !== undefined ? ' | ltr=' + s.ltr_score.toFixed(4) : '';
         return '<div class="card">' +
-          '<div style="display:flex;justify-content:space-between;align-items:center;"><div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;"><span class="' + stockClass + '">' + stockBadge + '</span>' + locBadge + '<span class="rank-badge" style="display:none;"></span><span class="delivery-badge" style="display:none;"></span></div><span style="color:#94a3b8;font-size:12px;">' + (p.categories || []).join(', ') + '</span></div>' +
+          '<div style="display:flex;justify-content:space-between;align-items:center;"><div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;"><span class="' + stockClass + '">' + stockBadge + '</span>' + locBadge + '<span class="rank-badge" style="display:none;"></span><span class="delivery-badge" style="display:none;"></span><span class="boost-badge" style="display:none;"></span></div><span style="color:#94a3b8;font-size:12px;">' + (p.categories || []).join(', ') + '</span></div>' +
           '<h3>' + p.title + '</h3>' +
           '<div style="color:#94a3b8;font-size:13px;">' + (p.description || '') + '</div>' +
-          '<div class="price">$' + ((p.priceInfo && p.priceInfo.price) || '0.00') + '</div>' +
+          '<div class="price"><span class="price-val">$' + ((p.priceInfo && p.priceInfo.price) || '0.00') + '</span><span class="base-price" style="display:none;text-decoration:line-through;color:var(--muted);font-size:14px;font-weight:normal;margin-left:8px;"></span><span class="contract-badge" style="display:none;margin-left:8px;"></span></div>' +
           '<div class="scores">hybrid=' + finalScore.toFixed(4) + ' | vec=' + vecScore.toFixed(4) + ' | txt=' + txtScore.toFixed(4) + ltrScore + '</div>' +
+          '<div style="margin-top:10px;display:flex;justify-content:flex-end;"><button type="button" class="record-click-btn" style="background:#1e293b;border:1px solid #64748b;color:#f8fafc;padding:3px 8px;border-radius:4px;cursor:pointer;font-size:11px;">+ Clique</button></div>' +
         '</div>';
       }).join('');
       (data.results || []).forEach((p, i) => {
@@ -345,6 +514,65 @@ const defaultStorefrontHTML = `<!DOCTYPE html>
             badge.style.borderRadius = '4px';
           }
         }
+        if (p.priceInfo && p.priceInfo.priceTableId) {
+          const baseEl = card.querySelector('.base-price');
+          if (baseEl) {
+            const baseVal = p.priceInfo.basePrice !== undefined && p.priceInfo.basePrice !== null
+              ? Number(p.priceInfo.basePrice).toFixed(2)
+              : p.priceInfo.originalPrice;
+            if (baseVal) {
+              baseEl.textContent = '$' + baseVal;
+              baseEl.style.display = 'inline';
+            }
+          }
+          const contractEl = card.querySelector('.contract-badge');
+          if (contractEl) {
+            contractEl.textContent = 'Contrato: ' + p.priceInfo.priceTableId;
+            contractEl.style.display = 'inline-block';
+            contractEl.style.background = '#1e293b';
+            contractEl.style.border = '1px solid #38bdf8';
+            contractEl.style.color = '#38bdf8';
+            contractEl.style.fontSize = '11px';
+            contractEl.style.padding = '2px 6px';
+            contractEl.style.borderRadius = '4px';
+          }
+        }
+        if (data.personalized && s.session_boost !== undefined) {
+          const boostEl = card.querySelector('.boost-badge');
+          if (boostEl) {
+            boostEl.textContent = 'boost: +' + Number(s.session_boost).toFixed(4);
+            boostEl.style.display = 'inline-block';
+            boostEl.style.background = '#3b0764';
+            boostEl.style.border = '1px solid #a855f7';
+            boostEl.style.color = '#e9d5ff';
+            boostEl.style.fontSize = '11px';
+            boostEl.style.padding = '2px 6px';
+            boostEl.style.borderRadius = '4px';
+          }
+        }
+        const recordBtn = card.querySelector('.record-click-btn');
+        if (recordBtn) {
+          recordBtn.textContent = '+ Clique';
+          recordBtn.onclick = async function(e) {
+            e.stopPropagation();
+            recordBtn.disabled = true;
+            recordBtn.textContent = 'Gravando...';
+            try {
+              const curSid = (document.getElementById('session_id') && document.getElementById('session_id').value.trim()) || 'sess-default';
+              const curTenant = (document.getElementById('tenant_id') && document.getElementById('tenant_id').value.trim()) || 'default';
+              await fetch('/api/session/events', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ session_id: curSid, product_id: p.id, event_type: 'click', tenant_id: curTenant })
+              });
+              runSearch();
+            } catch (err) {
+              console.error(err);
+              recordBtn.textContent = 'Erro';
+              recordBtn.disabled = false;
+            }
+          };
+        }
       });
     }
     const qInput = document.getElementById('q');
@@ -379,6 +607,14 @@ const defaultStorefrontHTML = `<!DOCTYPE html>
           }
         }, 150);
       });
+    const sidEl = document.getElementById('session_id');
+    if (sidEl && !sidEl.value) {
+      let storedSid = sessionStorage.getItem('psearch_storefront_session_id');
+      if (!storedSid) {
+        storedSid = 'sess-' + Math.random().toString(16).substring(2, 10) + Math.random().toString(16).substring(2, 10);
+        sessionStorage.setItem('psearch_storefront_session_id', storedSid);
+      }
+      sidEl.value = storedSid;
     }
     runSearch();
   </script>

@@ -50,7 +50,7 @@ class ConversationalSearchService:
             project=project_id,
             location=location,
         )
-        self.model = os.environ.get("GEMINI_LITE_MODEL", "gemini-3.5-flash-lite")
+        self.model = os.environ.get("GEMINI_TEXT_MODEL", os.environ.get("GEMINI_LITE_MODEL", "gemini-3.8-flash"))
 
     def process_query(
         self,

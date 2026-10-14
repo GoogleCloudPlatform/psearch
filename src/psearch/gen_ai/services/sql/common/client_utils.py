@@ -23,6 +23,15 @@ from typing import Dict, Any, Optional, List, Union, Tuple
 
 logger = logging.getLogger(__name__)
 
+def normalize_model_id(model_name: Optional[str]) -> Optional[str]:
+    """Normalizes model aliases (e.g. gemini-4.0-pro -> gemini-4-pro)."""
+    if not model_name:
+        return model_name
+    m = model_name.strip().lower()
+    if m in ("gemini-4-pro", "gemini-4.0-pro"):
+        return "gemini-4-pro"
+    return model_name
+
 class GenAIClient:
     """Handles GenAI client initialization and common API call logic."""
 
@@ -32,8 +41,8 @@ class GenAIClient:
 
         Args:
             project_id: The Google Cloud Project ID.
-            location: Vertex AI location for Gen AI calls (Gemini 3.x is served from "global").
-            model_name: Optional. The Gemini model name. Defaults to GEMINI_MODEL env var or "gemini-3.5-flash".
+            location: Vertex AI location for Gen AI calls (Gemini 3.x / 4.x is served from "global").
+            model_name: Optional. The Gemini model name. Defaults to GEMINI_TEXT_MODEL, GEMINI_MODEL env var or "gemini-3.8-flash".
         """
         self.project_id = project_id
         self.location = location
@@ -49,7 +58,8 @@ class GenAIClient:
             logger.error(f"Failed to initialize GenAI client for Vertex AI: {str(e)}")
             raise
             
-        self.model_name = model_name or os.environ.get("GEMINI_MODEL", "gemini-3.5-flash") # Updated default
+        raw_model = model_name or os.environ.get("GEMINI_TEXT_MODEL", os.environ.get("GEMINI_MODEL", "gemini-3.8-flash"))
+        self.model_name = normalize_model_id(raw_model)
         logger.info(f"Using Gemini model: {self.model_name}")
 
 
