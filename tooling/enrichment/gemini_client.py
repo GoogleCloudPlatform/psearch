@@ -14,51 +14,51 @@
 # limitations under the License.
 
 import os
-import vertexai
-from vertexai.generative_models import GenerativeModel, Part, SafetySetting
+from functools import lru_cache
 
-def init_gemini(project_id):
-    """Initialize Gemini client."""
-    vertexai.init(project=project_id, location="us-central1")
+from google import genai
+from google.genai import types
+
+# Issue #11: migrated from the deprecated `vertexai.generative_models` SDK to the
+# Google Gen AI SDK (`google-genai`). Gemini 3.x is served from the Vertex AI
+# "global" location, not us-central1.
+GEMINI_TEXT_MODEL = os.environ.get("GEMINI_TEXT_MODEL", "gemini-3.5-flash")
+GENAI_LOCATION = os.environ.get("GENAI_LOCATION", "global")
+
+
+@lru_cache(maxsize=None)
+def get_genai_client(project_id):
+    """Return a cached Vertex AI-backed Gen AI client."""
+    return genai.Client(vertexai=True, project=project_id, location=GENAI_LOCATION)
+
 
 def get_image_description(image_bytes, project_id, product_data):
-    """Generate image description using Vertex AI Gemini Flash."""
-    init_gemini(project_id)
-    
-    model = GenerativeModel("gemini-1.5-flash-001")
-    
-    generation_config = {
-        "max_output_tokens": 8192,
-        "temperature": 0.2,
-        "top_p": 0.95,
-    }
-    
+    """Generate an e-commerce description for a product image with Gemini."""
+    client = get_genai_client(project_id)
+
     safety_settings = [
-        SafetySetting(
-            category=SafetySetting.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-            threshold=SafetySetting.HarmBlockThreshold.OFF
-        ),
-        SafetySetting(
-            category=SafetySetting.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-            threshold=SafetySetting.HarmBlockThreshold.OFF
-        ),
-        SafetySetting(
-            category=SafetySetting.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-            threshold=SafetySetting.HarmBlockThreshold.OFF
-        ),
-        SafetySetting(
-            category=SafetySetting.HarmCategory.HARM_CATEGORY_HARASSMENT,
-            threshold=SafetySetting.HarmBlockThreshold.OFF
-        ),
+        types.SafetySetting(category=category, threshold=types.HarmBlockThreshold.OFF)
+        for category in (
+            types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+            types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+            types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+            types.HarmCategory.HARM_CATEGORY_HARASSMENT,
+        )
     ]
-    
+    config = types.GenerateContentConfig(
+        max_output_tokens=8192,
+        temperature=0.2,
+        top_p=0.95,
+        safety_settings=safety_settings,
+    )
+
     try:
-        image_part = Part.from_data(data=image_bytes, mime_type="image/png")
+        image_part = types.Part.from_bytes(data=image_bytes, mime_type="image/png")
         brand_name = product_data.get('brand', 'Unknown Brand')
         product_name = product_data.get('name', '')
         category = product_data.get('category', '')
         retail_price = product_data.get('retail_price', '')
-        
+
         prompt = f"""Analyze this {brand_name} product image and provide a compelling e-commerce pharmacy description that includes:
 1. Product name: {product_name}
 2. Brand highlights: Emphasize {brand_name}'s reputation and quality in the {category} category
@@ -72,13 +72,13 @@ def get_image_description(image_bytes, project_id, product_data):
 
 Focus on creating persuasive content that highlights the {brand_name} brand value and helps shoppers make a confident purchase decision."""
         
-        response = model.generate_content(
-            [prompt, image_part],
-            generation_config=generation_config,
-            safety_settings=safety_settings,
+        response = client.models.generate_content(
+            model=GEMINI_TEXT_MODEL,
+            contents=[prompt, image_part],
+            config=config,
         )
-        
+
         return response.text
     except Exception as e:
         print(f"Error generating image description: {str(e)}")
-        return None 
+        return None

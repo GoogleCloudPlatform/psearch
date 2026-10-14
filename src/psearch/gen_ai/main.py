@@ -83,7 +83,8 @@ app.add_middleware(
 
 # Get environment variables
 project_id = os.environ.get("PROJECT_ID")
-location = "us-central1"
+# Gemini 3.x models are served from the Vertex AI "global" endpoint, not us-central1 (Issue #11).
+location = os.environ.get("GENAI_LOCATION", "global")
 
 # Initialize services
 conversational_search_service = ConversationalSearchService(project_id, location)

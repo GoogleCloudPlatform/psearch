@@ -1,19 +1,3 @@
-/*
- * Copyright 2025 Google LLC
- * 
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- * 
- *     https://www.apache.org/licenses/LICENSE-2.0
- * 
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 package services
 
 import (
@@ -21,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sort"
+	"strings"
 	"time"
 
 	"cloud.google.com/go/spanner"
@@ -29,177 +15,283 @@ import (
 	"psearch/serving-go/internal/models"
 )
 
-// SpannerService handles interactions with Spanner database
 type SpannerService struct {
-	client     *spanner.Client
-	config     *config.Config
-	embeddings *EmbeddingService
+	client       *spanner.Client
+	config       *config.Config
+	embeddings   QueryEmbedder
+	seedProducts []models.SearchResult
+	backendMode  string
 }
 
-// NewSpannerService creates a new Spanner service
-func NewSpannerService(ctx context.Context, cfg *config.Config, embeddings *EmbeddingService) (*SpannerService, error) {
-	// Create the Spanner client
-	databaseName := fmt.Sprintf("projects/%s/instances/%s/databases/%s", 
-		cfg.ProjectID, cfg.SpannerInstanceID, cfg.SpannerDatabaseID)
-	
-	client, err := spanner.NewClient(ctx, databaseName)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create Spanner client: %v", err)
+func NewSpannerService(ctx context.Context, cfg *config.Config, embeddings QueryEmbedder) (*SpannerService, error) {
+	svc := &SpannerService{
+		config:       cfg,
+		embeddings:   embeddings,
+		seedProducts: DefaultSeedProducts(),
+		backendMode:  "memory",
 	}
 
-	return &SpannerService{
-		client:     client,
-		config:     cfg,
-		embeddings: embeddings,
-	}, nil
+	if cfg.UseMemoryStore || cfg.ProjectID == "" || cfg.SpannerInstanceID == "" || cfg.SpannerDatabaseID == "" {
+		return svc, nil
+	}
+
+	databaseName := fmt.Sprintf("projects/%s/instances/%s/databases/%s",
+		cfg.ProjectID, cfg.SpannerInstanceID, cfg.SpannerDatabaseID)
+	client, err := spanner.NewClient(ctx, databaseName)
+	if err != nil {
+		log.Printf("WARN: Spanner client creation failed (%v), using memory fallback", err)
+		return svc, nil
+	}
+	svc.client = client
+	svc.backendMode = "spanner"
+
+	go func() {
+		seedCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		if err := svc.SeedIfEmpty(seedCtx); err != nil {
+			log.Printf("WARN: Spanner seed check: %v", err)
+		}
+	}()
+
+	return svc, nil
 }
 
-// Close closes the Spanner client connection
 func (s *SpannerService) Close() {
 	if s.client != nil {
 		s.client.Close()
 	}
 }
 
-// GetProduct retrieves a single product by ID
-func (s *SpannerService) GetProduct(ctx context.Context, productID string) (map[string]interface{}, error) {
-	row, err := s.client.Single().ReadRow(ctx, "products", spanner.Key{productID}, []string{"product_data"})
-	if err != nil {
-		return nil, fmt.Errorf("failed to read product %s: %v", productID, err)
-	}
-
-	var productDataJSON string
-	if err := row.Column(0, &productDataJSON); err != nil {
-		return nil, fmt.Errorf("failed to scan product data: %v", err)
-	}
-
-	var productData map[string]interface{}
-	if err := json.Unmarshal([]byte(productDataJSON), &productData); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal product data: %v", err)
-	}
-
-	return productData, nil
+func (s *SpannerService) BackendMode() string {
+	return s.backendMode
 }
 
-// GetProductsBatch retrieves multiple products by their IDs in a single batch
-func (s *SpannerService) GetProductsBatch(ctx context.Context, productIDs []string) (map[string]map[string]interface{}, error) {
-	if len(productIDs) == 0 {
-		return make(map[string]map[string]interface{}), nil
-	}
-
-	startTime := time.Now()
-
-	// Create a SQL statement with UNNEST to handle large number of product IDs
-	stmt := spanner.Statement{
-		SQL: `SELECT product_id, product_data 
-              FROM products 
-              WHERE product_id IN UNNEST(@product_ids)`,
-		Params: map[string]interface{}{
-			"product_ids": productIDs,
-		},
-	}
-
-	resultMap := make(map[string]map[string]interface{})
-	
-	// Execute the query
-	iter := s.client.Single().Query(ctx, stmt)
-	defer iter.Stop()
-
-	for {
-		row, err := iter.Next()
-		if err == iterator.Done {
-			break
-		}
-		if err != nil {
-			return nil, fmt.Errorf("error iterating through query results: %v", err)
-		}
-
-		var productID string
-		var productDataJSON spanner.NullJSON
-
-		if err := row.Columns(&productID, &productDataJSON); err != nil {
-			return nil, fmt.Errorf("failed to scan columns: %v", err)
-		}
-
-		if productDataJSON.Valid {
-			// Type assert productDataJSON.Value directly to map[string]interface{}
-			productData, ok := productDataJSON.Value.(map[string]interface{})
-			if !ok {
-				// Log the actual type if the assertion fails
-				log.Printf("DEBUG: Unexpected type for productDataJSON.Value: %T", productDataJSON.Value)
-				return nil, fmt.Errorf("failed to type assert product data from NullJSON.Value")
+func (s *SpannerService) ProductCount() int {
+	if s.client != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		stmt := spanner.Statement{SQL: `SELECT COUNT(*) FROM products`}
+		iter := s.client.Single().Query(ctx, stmt)
+		defer iter.Stop()
+		if row, err := iter.Next(); err == nil {
+			var cnt int64
+			if err := row.Columns(&cnt); err == nil && cnt > 0 {
+				return int(cnt)
 			}
-			resultMap[productID] = productData
+		}
+	}
+	return len(s.seedProducts)
+}
+
+func (s *SpannerService) SeedIfEmpty(ctx context.Context) error {
+	if s.client == nil {
+		return nil
+	}
+	stmt := spanner.Statement{SQL: `SELECT COUNT(*) FROM products`}
+	iter := s.client.Single().Query(ctx, stmt)
+	row, err := iter.Next()
+	iter.Stop()
+	if err != nil {
+		return err
+	}
+	var count int64
+	if err := row.Columns(&count); err != nil {
+		return err
+	}
+	if count > 0 {
+		return nil
+	}
+
+	log.Printf("Seeding %d baseline products into Cloud Spanner (%s)...", len(s.seedProducts), s.config.SpannerDatabaseID)
+	var muts []*spanner.Mutation
+	for _, p := range s.seedProducts {
+		rawJSON, _ := json.Marshal(p)
+		emb := DeterministicEmbedding(p.Title+" "+p.Description+" "+strings.Join(p.Categories, " ")+" "+strings.Join(p.Brands, " "), 768)
+		cat := ""
+		if len(p.Categories) > 0 {
+			cat = p.Categories[0]
+		}
+		brand := ""
+		if len(p.Brands) > 0 {
+			brand = p.Brands[0]
+		}
+		stock := int64(0)
+		if p.AvailableQuantity != nil {
+			stock = int64(*p.AvailableQuantity)
+		}
+		muts = append(muts, spanner.InsertOrUpdate("products",
+			[]string{"product_id", "product_data", "title", "description", "category", "brand", "price", "is_available", "stock", "embedding", "timestamp"},
+			[]interface{}{
+				p.ID,
+				spanner.NullJSON{Value: json.RawMessage(rawJSON), Valid: true},
+				p.Title,
+				p.Description,
+				cat,
+				brand,
+				p.PriceInfo.NumericPrice,
+				p.Availability == "IN_STOCK",
+				stock,
+				emb,
+				spanner.CommitTimestamp,
+			},
+		))
+	}
+	_, err = s.client.Apply(ctx, muts)
+	return err
+}
+
+// Retrieval modes reported per search response so operators can verify which
+// path actually served a query (Issue #11 rollout finding).
+const (
+	RetrievalHybridV1    = "hybrid_v1"             // Spanner RRF, legacy 768-d deterministic vectors
+	RetrievalHybridV2    = "hybrid_v2"             // Spanner RRF, gemini-embedding-2 1024-d vectors
+	RetrievalLexicalOnly = "lexical_only_degraded" // v2 active but query embedding unavailable
+	RetrievalMemory      = "memory_fallback"       // in-process demo engine (no Spanner / Spanner error)
+)
+
+// SearchOutcome carries results plus the retrieval path that produced them.
+type SearchOutcome struct {
+	Results       []models.SearchResult
+	RetrievalMode string
+}
+
+// HybridSearch executes hybrid vector + full-text RRF search against Cloud Spanner (with deterministic fallback).
+func (s *SpannerService) HybridSearch(ctx context.Context, query string, limit int, minScore float64, alpha float64) ([]models.SearchResult, error) {
+	out, err := s.HybridSearchDetailed(ctx, query, limit, minScore, alpha)
+	return out.Results, err
+}
+
+// HybridSearchDetailed is HybridSearch plus the retrieval mode that served the query.
+func (s *SpannerService) HybridSearchDetailed(ctx context.Context, query string, limit int, minScore float64, alpha float64) (SearchOutcome, error) {
+	if limit <= 0 {
+		limit = s.config.DefaultLimit
+	}
+	if alpha < 0 {
+		alpha = 0
+	}
+	if alpha > 1 {
+		alpha = 1
+	}
+
+	if s.client != nil && strings.TrimSpace(query) != "" {
+		plan := s.planVectorQuery(ctx, query)
+		res, err := s.spannerHybridSearch(ctx, query, limit, minScore, alpha, plan)
+		switch {
+		case err != nil:
+			log.Printf("WARN: Spanner HybridSearch fallback triggered: %v", err)
+		case plan.lexicalOnly:
+			// Degraded v2: return Spanner's lexical results as-is (even if empty).
+			// Falling back to the in-memory engine here would mask the outage with
+			// deterministic 768-d vector scores.
+			return SearchOutcome{Results: res, RetrievalMode: RetrievalLexicalOnly}, nil
+		case len(res) > 0:
+			mode := RetrievalHybridV1
+			if plan.column == vectorColumnV2 {
+				mode = RetrievalHybridV2
+			}
+			return SearchOutcome{Results: res, RetrievalMode: mode}, nil
 		}
 	}
 
-	elapsed := time.Since(startTime)
-	log.Printf("Spanner batch fetch for %d products took %s, retrieved %d", 
-		len(productIDs), elapsed, len(resultMap))
-
-	return resultMap, nil
+	return SearchOutcome{Results: s.memoryHybridSearch(query, limit, minScore, alpha), RetrievalMode: RetrievalMemory}, nil
 }
 
-// HybridSearch performs a hybrid search using both vector similarity and text search
-func (s *SpannerService) HybridSearch(ctx context.Context, query string, limit int, minScore float64, alpha float64) ([]models.SearchResult, error) {
-	startTime := time.Now()
+// vectorPlan describes how the vector leg of the hybrid query is executed.
+type vectorPlan struct {
+	column      string      // vector column to search ("embedding" for v1, "embedding_v2" for v2)
+	embedding   interface{} // []float64 (v1 deterministic) or []float32 (v2 Gemini)
+	lexicalOnly bool        // true when no usable query embedding exists (degraded mode)
+}
 
-	// Generate embeddings for the query
-	embedding, err := s.embeddings.GenerateEmbedding(ctx, query)
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate embedding: %v", err)
+const (
+	vectorColumnV1 = "embedding"
+	vectorColumnV2 = "embedding_v2"
+)
+
+// planVectorQuery selects the vector column / query embedding for the active
+// embedding version (ADR-001 Blue/Green). v1 keeps the legacy 768-d deterministic
+// embedding; v2 uses gemini-embedding-2 via the Gen AI SDK. Any embedding failure
+// degrades to lexical-only retrieval instead of failing the request (Issue #11).
+func (s *SpannerService) planVectorQuery(ctx context.Context, query string) vectorPlan {
+	if !s.config.UseGeminiEmbeddings() {
+		return vectorPlan{column: vectorColumnV1, embedding: DeterministicEmbedding(query, config.LegacyEmbeddingDimension)}
 	}
+	if s.embeddings == nil {
+		log.Printf("WARN: ACTIVE_EMBEDDING_VERSION=v2 but embedding service is unavailable; lexical-only search")
+		return vectorPlan{column: vectorColumnV2, lexicalOnly: true}
+	}
+	emb, err := s.embeddings.EmbedQuery(ctx, query)
+	if err != nil {
+		log.Printf("WARN: query embedding failed (%v); lexical-only search", err)
+		return vectorPlan{column: vectorColumnV2, lexicalOnly: true}
+	}
+	return vectorPlan{column: vectorColumnV2, embedding: emb}
+}
 
-	// Construct hybrid search SQL query
-	// This combines vector similarity search with text search using the configured alpha value
-	sql := `
-		@{optimizer_version=7}
-		WITH ann AS (
-		SELECT offset + 1 AS rank, product_id, title, product_data
-		FROM UNNEST(ARRAY(
-			SELECT AS STRUCT product_id, title, product_data
-			FROM products @{FORCE_INDEX=products_by_embedding}
-			WHERE embedding IS NOT NULL
-			ORDER BY APPROX_COSINE_DISTANCE(embedding, @query_embedding,
-			OPTIONS=>JSON'{"num_leaves_to_search": 10}')
-			LIMIT @limit)) WITH OFFSET AS offset
-		),
+// buildHybridSQL renders the RRF hybrid query. column is always one of the
+// package constants (never user input).
+func buildHybridSQL(column string, lexicalOnly bool) string {
+	fts := `
 		fts AS (
-		SELECT offset + 1 AS rank, product_id, title, product_data
-		FROM UNNEST(ARRAY(
-			SELECT AS STRUCT product_id, title, product_data
-			FROM products
-			WHERE SEARCH(title_tokens, @query_text)
-			ORDER BY SCORE(title_tokens, @query_text) DESC
-			LIMIT @limit)) WITH OFFSET AS offset
-		)
-		SELECT 
-			SUM(1 / (60 + rank)) AS rrf_score, 
+			SELECT offset + 1 AS rank, product_id, title, product_data
+			FROM UNNEST(ARRAY(
+				SELECT AS STRUCT product_id, title, product_data
+				FROM products
+				WHERE SEARCH(title_tokens, @query_text) OR SEARCH(description_tokens, @query_text)
+				ORDER BY (SCORE(title_tokens, @query_text) + SCORE(description_tokens, @query_text)) DESC
+				LIMIT @limit
+			)) WITH OFFSET AS offset
+		)`
+	ann := `
+		ann AS (
+			SELECT offset + 1 AS rank, product_id, title, product_data
+			FROM UNNEST(ARRAY(
+				SELECT AS STRUCT product_id, title, product_data
+				FROM products
+				WHERE ` + column + ` IS NOT NULL
+				ORDER BY COSINE_DISTANCE(` + column + `, @query_embedding)
+				LIMIT @limit
+			)) WITH OFFSET AS offset
+		),`
+	union := `
+			SELECT 'vector' AS source, @alpha AS weight, rank, product_id, title, product_data FROM ann
+			UNION ALL
+			SELECT 'text' AS source, (1.0 - @alpha) AS weight, rank, product_id, title, product_data FROM fts`
+	if lexicalOnly {
+		ann = ""
+		union = `
+			SELECT 'text' AS source, 1.0 AS weight, rank, product_id, title, product_data FROM fts`
+	}
+	return `
+		WITH` + ann + fts + `
+		SELECT
+			SUM(weight / (60.0 + rank)) AS rrf_score,
+			MAX(IF(source = 'vector', 1.0 / (60.0 + rank), 0.0)) AS vector_score,
+			MAX(IF(source = 'text', 1.0 / (60.0 + rank), 0.0)) AS text_score,
 			product_id,
 			ANY_VALUE(title) AS title,
-			ANY_VALUE(product_data) AS product_data 
-		FROM ((
-		SELECT rank, product_id, title, product_data
-		FROM ann
+			ANY_VALUE(product_data) AS product_data
+		FROM (` + union + `
 		)
-		UNION ALL (
-		SELECT rank, product_id, title, product_data
-		FROM fts
-		))
 		GROUP BY product_id
 		ORDER BY rrf_score DESC
-		LIMIT @limit;
+		LIMIT @limit
 	`
+}
 
-	// Create parameters
+func (s *SpannerService) spannerHybridSearch(ctx context.Context, query string, limit int, minScore float64, alpha float64, plan vectorPlan) ([]models.SearchResult, error) {
+	sql := buildHybridSQL(plan.column, plan.lexicalOnly)
 	params := map[string]interface{}{
-		"query_embedding": embedding,
-		"query_text":      query,
-		"limit":           limit,
+		"query_text": query,
+		"alpha":      alpha,
+		"limit":      int64(limit),
+	}
+	if !plan.lexicalOnly {
+		params["query_embedding"] = plan.embedding
 	}
 
-	// Execute the query
 	stmt := spanner.Statement{SQL: sql, Params: params}
+
 	iter := s.client.Single().Query(ctx, stmt)
 	defer iter.Stop()
 
@@ -210,234 +302,134 @@ func (s *SpannerService) HybridSearch(ctx context.Context, query string, limit i
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("error iterating through search results: %v", err)
+			return nil, err
 		}
-
-		var productIDInt string
-		var title string
+		var rrfScore, vecScore, txtScore float64
+		var productID, title string
 		var productDataJSON spanner.NullJSON
-		var hybridScore float64
-
-		if err := row.Columns(&hybridScore, &productIDInt, &title, &productDataJSON); err != nil {
-			return nil, fmt.Errorf("failed to scan search result: %v", err)
+		if err := row.Columns(&rrfScore, &vecScore, &txtScore, &productID, &title, &productDataJSON); err != nil {
+			return nil, err
 		}
-
-		productID := fmt.Sprintf("%d", productIDInt)
-
-		if !productDataJSON.Valid {
+		if rrfScore < minScore {
 			continue
 		}
-
-		// Type assert productDataJSON.Value directly to map[string]interface{}
-		productData, ok := productDataJSON.Value.(map[string]interface{})
-		if !ok {
-			// Log the actual type if the assertion fails
-			log.Printf("DEBUG: Unexpected type for productDataJSON.Value in search result: %T", productDataJSON.Value)
-			return nil, fmt.Errorf("failed to type assert product data from NullJSON.Value for search result")
+		var item models.SearchResult
+		if productDataJSON.Valid {
+			raw, _ := json.Marshal(productDataJSON.Value)
+			_ = json.Unmarshal(raw, &item)
 		}
-
-		// Skip if score is below minimum threshold
-		if hybridScore < minScore {
-			continue
+		if item.ID == "" {
+			item.ID = productID
 		}
-
-		// Transform to search result
-		searchResult, err := s.transformToSearchResult(productID, productData, hybridScore)
-		if err != nil {
-			log.Printf("Warning: could not transform product %s: %v", productID, err)
-			continue
+		if item.Title == "" {
+			item.Title = title
 		}
-
-		results = append(results, searchResult)
+		effAlpha := alpha
+		if plan.lexicalOnly {
+			effAlpha = 0
+		}
+		item.Score = map[string]float64{
+			"hybrid": rrfScore,
+			"vector": vecScore,
+			"text":   txtScore,
+			"alpha":  effAlpha,
+		}
+		results = append(results, item)
 	}
-
-	elapsed := time.Since(startTime)
-	log.Printf("Hybrid search completed in %s, found %d results", elapsed, len(results))
-
 	return results, nil
 }
 
-// transformToSearchResult converts product data into a SearchResult
-func (s *SpannerService) transformToSearchResult(productID string, productData map[string]interface{}, score float64) (models.SearchResult, error) {
-	// Create score map
-	scoreMap := map[string]float64{
-		"hybrid": score,
+func (s *SpannerService) memoryHybridSearch(query string, limit int, minScore float64, alpha float64) []models.SearchResult {
+	qLower := strings.ToLower(strings.TrimSpace(query))
+	qTokens := strings.Fields(qLower)
+	qVec := DeterministicEmbedding(query, 768)
+
+	type scored struct {
+		prod     models.SearchResult
+		vecSim   float64
+		txtRaw   float64
+		vecRank  int
+		txtRank  int
+		rrfScore float64
+		vecRRF   float64
+		txtRRF   float64
 	}
 
-	// Extract name
-	name, _ := productData["name"].(string)
-	
-	// Extract title
-	title, _ := productData["title"].(string)
+	items := make([]scored, len(s.seedProducts))
+	for i, p := range s.seedProducts {
+		docText := strings.ToLower(p.Title + " " + p.Description + " " + strings.Join(p.Brands, " ") + " " + strings.Join(p.Categories, " "))
+		pVec := DeterministicEmbedding(docText, 768)
+		vecSim := CosineSimilarity(qVec, pVec)
 
-	// Extract brands
-	var brands []string
-	if brandsData, ok := productData["brands"].([]interface{}); ok {
-		for _, b := range brandsData {
-			if brand, ok := b.(string); ok {
-				brands = append(brands, brand)
-			}
-		}
-	}
-
-	// Extract categories
-	var categories []string
-	if categoriesData, ok := productData["categories"].([]interface{}); ok {
-		for _, c := range categoriesData {
-			if category, ok := c.(string); ok {
-				categories = append(categories, category)
-			}
-		}
-	}
-
-	// Handle price info
-	priceInfo := models.PriceInfo{
-		CurrencyCode: "USD", // Default
-	}
-	if priceInfoData, ok := productData["priceInfo"].(map[string]interface{}); ok {
-		if cost, ok := priceInfoData["cost"].(string); ok {
-			priceInfo.Cost = cost
-		}
-		if currencyCode, ok := priceInfoData["currencyCode"].(string); ok {
-			priceInfo.CurrencyCode = currencyCode
-		}
-		if originalPrice, ok := priceInfoData["originalPrice"].(string); ok {
-			priceInfo.OriginalPrice = originalPrice
-		}
-		if price, ok := priceInfoData["price"].(string); ok {
-			priceInfo.Price = price
-		}
-		if effectiveTime, ok := priceInfoData["priceEffectiveTime"].(string); ok {
-			priceInfo.PriceEffectiveTime = effectiveTime
-		}
-		if expireTime, ok := priceInfoData["priceExpireTime"].(string); ok {
-			priceInfo.PriceExpireTime = expireTime
-		}
-	}
-
-	// Handle images
-	var images []models.Image
-	if imagesData, ok := productData["images"].([]interface{}); ok {
-		for _, img := range imagesData {
-			if imgMap, ok := img.(map[string]interface{}); ok {
-				height := "0"
-				width := "0"
-				uri := ""
-
-				if h, ok := imgMap["height"].(string); ok {
-					height = h
+		var txtRaw float64
+		if qLower == "" {
+			txtRaw = 1.0
+		} else {
+			for _, tok := range qTokens {
+				if strings.Contains(strings.ToLower(p.Title), tok) {
+					txtRaw += 2.0
 				}
-				if w, ok := imgMap["width"].(string); ok {
-					width = w
-				}
-				if u, ok := imgMap["uri"].(string); ok {
-					uri = u
-				}
-
-				// Convert gs:// URLs to https://storage.googleapis.com/
-				if len(uri) > 5 && uri[:5] == "gs://" {
-					uri = "https://storage.googleapis.com/" + uri[5:]
-				}
-
-				images = append(images, models.Image{
-					Height: height,
-					Width:  width,
-					URI:    uri,
-				})
-			}
-		}
-	}
-
-	// Extract sizes
-	var sizes []string
-	if sizesData, ok := productData["sizes"].([]interface{}); ok {
-		for _, s := range sizesData {
-			if size, ok := s.(string); ok {
-				sizes = append(sizes, size)
-			} else if sizeNum, ok := s.(float64); ok {
-				sizes = append(sizes, fmt.Sprintf("%v", sizeNum))
-			}
-		}
-	}
-
-	// Extract URI
-	uri, _ := productData["uri"].(string)
-
-	// Process attributes
-	var attributes []models.Attribute
-	if attrsData, ok := productData["attributes"].([]interface{}); ok {
-		for _, attr := range attrsData {
-			if attrMap, ok := attr.(map[string]interface{}); ok {
-				key, keyOk := attrMap["key"].(string)
-				valueData, valueOk := attrMap["value"].(map[string]interface{})
-				
-				if keyOk && valueOk {
-					// Handle attribute value
-					attrValue := models.AttributeValue{}
-					
-					if textData, ok := valueData["text"].([]interface{}); ok {
-						for _, t := range textData {
-							if textStr, ok := t.(string); ok {
-								attrValue.Text = append(attrValue.Text, textStr)
-							}
-						}
-					}
-
-					if numbersData, ok := valueData["numbers"].([]interface{}); ok {
-						for _, n := range numbersData {
-							if num, ok := n.(float64); ok {
-								attrValue.Numbers = append(attrValue.Numbers, num)
-							}
-						}
-					}
-
-					if indexable, ok := valueData["indexable"].(string); ok {
-						attrValue.Indexable = &indexable
-					}
-
-					if searchable, ok := valueData["searchable"].(string); ok {
-						attrValue.Searchable = &searchable
-					}
-
-					attributes = append(attributes, models.Attribute{
-						Key:   key,
-						Value: attrValue,
-					})
+				if strings.Contains(docText, tok) {
+					txtRaw += 1.0
 				}
 			}
 		}
+		items[i] = scored{prod: p, vecSim: vecSim, txtRaw: txtRaw}
 	}
 
-	// Handle tags as attributes
-	if tagsData, ok := productData["tags"].([]interface{}); ok {
-		for _, t := range tagsData {
-			if tag, ok := t.(string); ok {
-				attributes = append(attributes, models.Attribute{
-					Key: "tag",
-					Value: models.AttributeValue{
-						Text: []string{tag},
-					},
-				})
-			}
+	// Assign vector ranks
+	vecOrder := make([]int, len(items))
+	for i := range vecOrder {
+		vecOrder[i] = i
+	}
+	sort.Slice(vecOrder, func(i, j int) bool {
+		return items[vecOrder[i]].vecSim > items[vecOrder[j]].vecSim
+	})
+	for rankIdx, itemIdx := range vecOrder {
+		items[itemIdx].vecRank = rankIdx + 1
+	}
+
+	// Assign text ranks
+	txtOrder := make([]int, len(items))
+	for i := range txtOrder {
+		txtOrder[i] = i
+	}
+	sort.Slice(txtOrder, func(i, j int) bool {
+		if items[txtOrder[i]].txtRaw == items[txtOrder[j]].txtRaw {
+			return items[txtOrder[i]].prod.ID < items[txtOrder[j]].prod.ID
 		}
+		return items[txtOrder[i]].txtRaw > items[txtOrder[j]].txtRaw
+	})
+	for rankIdx, itemIdx := range txtOrder {
+		items[itemIdx].txtRank = rankIdx + 1
 	}
 
-	// Create search result
-	result := models.SearchResult{
-		ID:                productID,
-		Name:              name,
-		Title:             title,
-		Brands:            brands,
-		Categories:        categories,
-		PriceInfo:         priceInfo,
-		Availability:      "IN_STOCK", // Default
-		Images:            images,
-		Sizes:             sizes,
-		RetrievableFields: "*",
-		Attributes:        attributes,
-		URI:               uri,
-		Score:             scoreMap,
+	var out []models.SearchResult
+	for i := range items {
+		items[i].vecRRF = 1.0 / float64(60+items[i].vecRank)
+		if items[i].txtRaw > 0 || qLower == "" {
+			items[i].txtRRF = 1.0 / float64(60+items[i].txtRank)
+		}
+		items[i].rrfScore = alpha*items[i].vecRRF + (1.0-alpha)*items[i].txtRRF
+		if items[i].rrfScore < minScore {
+			continue
+		}
+		res := items[i].prod
+		res.Score = map[string]float64{
+			"hybrid":     items[i].rrfScore,
+			"vector":     items[i].vecRRF,
+			"text":       items[i].txtRRF,
+			"cosine_sim": items[i].vecSim,
+			"alpha":      alpha,
+		}
+		out = append(out, res)
 	}
 
-	return result, nil
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Score["hybrid"] > out[j].Score["hybrid"]
+	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out
 }

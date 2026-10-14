@@ -62,13 +62,14 @@ AS (
         psearch.products AS raw
     ),
     embeddings_generated AS (
+      -- Issue #11: ML.GENERATE_EMBEDDING + gemini-embedding-2 @ 1024 dims (ADR-001 Blue/Green v2 column)
       SELECT
-        ml_generate_text_embedding_result.product_id,
+        ml_generate_embedding_result.product_id,
         td.title,
         td.product_data_json,
-        ml_generate_text_embedding_result.text_embedding AS embedding_array
+        ml_generate_embedding_result.ml_generate_embedding_result AS embedding_array
       FROM
-        ML.GENERATE_TEXT_EMBEDDING (
+        ML.GENERATE_EMBEDDING (
           MODEL psearch.embedding_model,
           (
             SELECT
@@ -77,18 +78,21 @@ AS (
             FROM
               transformed_data
           ),
-          STRUCT(TRUE AS flatten_json_output)
-        ) AS ml_generate_text_embedding_result
+          STRUCT(
+            1024 AS output_dimensionality,
+            'RETRIEVAL_DOCUMENT' AS task_type
+          )
+        ) AS ml_generate_embedding_result
       JOIN
         transformed_data AS td
       ON
-        ml_generate_text_embedding_result.product_id = td.product_id
+        ml_generate_embedding_result.product_id = td.product_id
     )
   SELECT
     eg.product_id,
     eg.title,
     eg.product_data_json AS product_data,
-    eg.embedding_array AS embedding
+    eg.embedding_array AS embedding_v2
   FROM
     embeddings_generated eg
 );

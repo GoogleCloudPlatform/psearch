@@ -1,115 +1,90 @@
-/*
- * Copyright 2025 Google LLC
- * 
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- * 
- *     https://www.apache.org/licenses/LICENSE-2.0
- * 
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 package config
 
 import (
-	"fmt"
 	"os"
 	"strconv"
 
 	"github.com/joho/godotenv"
 )
 
-// Config holds all configuration for the application
 type Config struct {
-	// Server configuration
-	Port        int
-	Environment string
-
-	// Google Cloud configuration
-	ProjectID          string
-	Region             string
-	SpannerInstanceID  string
-	SpannerDatabaseID  string
-	GeminiModelName    string
-	EmbeddingDimension int
-
-	// Application defaults
-	DefaultAlpha  float64
-	DefaultLimit  int
-	MinScoreValue float64
+	Port                     int
+	Environment              string
+	ProjectID                string
+	Region                   string
+	SpannerInstanceID        string
+	SpannerDatabaseID        string
+	GenAILocation            string // Vertex AI location for Gen AI SDK calls (Gemini 3.x / gemini-embedding-2 => "global")
+	EmbeddingModelName       string // Gemini embedding model used for the v2 vector column
+	GeminiEmbeddingDimension int    // output_dimensionality requested from the embedding model (ADR-001: 1024)
+	EmbeddingDimension       int    // dimension of the ACTIVE vector column (v1=768 legacy, v2=GeminiEmbeddingDimension)
+	ActiveEmbeddingVersion   string
+	DefaultAlpha             float64
+	DefaultLimit             int
+	MinScoreValue            float64
+	UseMemoryStore           bool
+	StaticDir                string
 }
 
-// Load loads configuration from environment variables with fallbacks to defaults
 func Load() (*Config, error) {
-	// Load .env file if it exists
-	godotenv.Load()
+	_ = godotenv.Load()
 
-	// Default configuration
-	config := &Config{
-		Port:              8080,
-		Environment:       "development",
-		GeminiModelName:   "text-multilingual-embedding-002",
-		EmbeddingDimension: 768,
-		DefaultAlpha:      0.5,
-		DefaultLimit:      100,
-		MinScoreValue:     0.0,
+	cfg := &Config{
+		Port:                     8080,
+		Environment:              getEnv("ENVIRONMENT", "production"),
+		ProjectID:                getEnv("PROJECT_ID", "riojucu-sandbox"),
+		Region:                   getEnv("REGION", "us-central1"),
+		SpannerInstanceID:        getEnv("SPANNER_INSTANCE_ID", "psearch-instance"),
+		SpannerDatabaseID:        getEnv("SPANNER_DATABASE_ID", "psearch-db"),
+		GenAILocation:            getEnv("GENAI_LOCATION", "global"),
+		EmbeddingModelName:       getEnv("EMBEDDING_MODEL_NAME", getEnv("GEMINI_MODEL_NAME", "gemini-embedding-2")),
+		GeminiEmbeddingDimension: 1024,
+		ActiveEmbeddingVersion:   getEnv("ACTIVE_EMBEDDING_VERSION", "v1"),
+		DefaultAlpha:             0.5,
+		DefaultLimit:             20,
+		MinScoreValue:            0.0,
+		UseMemoryStore:           getEnv("USE_MEMORY_STORE", "false") == "true",
+		StaticDir:                getEnv("STATIC_DIR", "/app/static"),
 	}
 
-	// Override with environment variables if set
 	if port, err := strconv.Atoi(getEnv("PORT", "8080")); err == nil {
-		config.Port = port
+		cfg.Port = port
 	}
-
-	config.Environment = getEnv("ENVIRONMENT", config.Environment)
-	config.ProjectID = getEnv("PROJECT_ID", "")
-	config.Region = getEnv("REGION", "us-central1")
-	config.SpannerInstanceID = getEnv("SPANNER_INSTANCE_ID", "")
-	config.SpannerDatabaseID = getEnv("SPANNER_DATABASE_ID", "")
-	config.GeminiModelName = getEnv("GEMINI_MODEL_NAME", config.GeminiModelName)
-
-	// Parse numeric values with defaults
-	if dim, err := strconv.Atoi(getEnv("EMBEDDING_DIMENSION", "768")); err == nil {
-		config.EmbeddingDimension = dim
+	if dim, err := strconv.Atoi(getEnv("EMBEDDING_DIMENSION", "1024")); err == nil && dim > 0 {
+		cfg.GeminiEmbeddingDimension = dim
 	}
-
+	cfg.EmbeddingDimension = cfg.ActiveDimension()
 	if alpha, err := strconv.ParseFloat(getEnv("DEFAULT_HYBRID_ALPHA", "0.5"), 64); err == nil {
-		config.DefaultAlpha = alpha
+		cfg.DefaultAlpha = alpha
 	}
-
-	if limit, err := strconv.Atoi(getEnv("DEFAULT_LIMIT", "10")); err == nil {
-		config.DefaultLimit = limit
+	if limit, err := strconv.Atoi(getEnv("DEFAULT_LIMIT", "20")); err == nil {
+		cfg.DefaultLimit = limit
 	}
-
 	if minScore, err := strconv.ParseFloat(getEnv("MIN_SCORE_VALUE", "0.0"), 64); err == nil {
-		config.MinScoreValue = minScore
+		cfg.MinScoreValue = minScore
 	}
 
-	// Validate required configuration
-	if config.ProjectID == "" {
-		return nil, fmt.Errorf("PROJECT_ID environment variable is required")
-	}
-
-	if config.SpannerInstanceID == "" {
-		return nil, fmt.Errorf("SPANNER_INSTANCE_ID environment variable is required")
-	}
-
-	if config.SpannerDatabaseID == "" {
-		return nil, fmt.Errorf("SPANNER_DATABASE_ID environment variable is required")
-	}
-
-	return config, nil
+	return cfg, nil
 }
 
-// getEnv gets an environment variable or returns a default value
-func getEnv(key, defaultValue string) string {
-	value := os.Getenv(key)
-	if value == "" {
-		return defaultValue
+// LegacyEmbeddingDimension is the dimension of the v1 `embedding` column
+// (deterministic hash embeddings, ARRAY<FLOAT32>(vector_length=>768)).
+const LegacyEmbeddingDimension = 768
+
+// UseGeminiEmbeddings reports whether the v2 (Gemini, embedding_v2) vector column is active.
+func (c *Config) UseGeminiEmbeddings() bool { return c.ActiveEmbeddingVersion == "v2" }
+
+// ActiveDimension returns the dimension of the currently active vector column.
+func (c *Config) ActiveDimension() int {
+	if c.UseGeminiEmbeddings() {
+		return c.GeminiEmbeddingDimension
 	}
-	return value
+	return LegacyEmbeddingDimension
+}
+
+func getEnv(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
 }

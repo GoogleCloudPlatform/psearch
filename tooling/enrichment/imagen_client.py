@@ -14,18 +14,27 @@
 # limitations under the License.
 
 import os
-import vertexai
-from vertexai.preview.vision_models import ImageGenerationModel
+from dataclasses import dataclass
 
-def init_imagen(project_id):
-    """Initialize Imagen client."""
-    vertexai.init(project=project_id, location="us-central1")
+from google.genai import types
+
+from gemini_client import get_genai_client
+
+# Issue #11: imagen-3.0-generate-002 (deprecated `vertexai.preview.vision_models`)
+# replaced by Gemini native image generation via the Google Gen AI SDK.
+GEMINI_IMAGE_MODEL = os.environ.get("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image")
+
+
+@dataclass
+class GeneratedImage:
+    image_bytes: bytes
+    mime_type: str = "image/png"
+
 
 def generate_image(row_data, project_id):
-    """Generate image based on product data using Vertex AI Imagen."""
-    init_imagen(project_id)
-    
-    # Create a more detailed prompt with specific product attributes
+    """Generate a product image with Gemini image generation (Vertex AI, GENAI_LOCATION from gemini_client)."""
+    client = get_genai_client(project_id)
+
     prompt = f"""Create a professional product image for an e-commerce listing:
 Product: {row_data['name']}
 Brand: {row_data['brand']}
@@ -33,25 +42,29 @@ Category: {row_data['category']} in {row_data['department']} department
 Style: Clean, well-lit product photography style with white background
 Focus: Show the product clearly with attention to detail and key features"""
 
-    model = ImageGenerationModel.from_pretrained("imagen-3.0-generate-002")
-    
     try:
-        images = model.generate_images(
-            prompt=prompt,
-            number_of_images=1,
-            language="en",
-            aspect_ratio="1:1",
-            safety_filter_level="block_some",
-            person_generation="allow_adult",
+        response = client.models.generate_content(
+            model=GEMINI_IMAGE_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_modalities=["TEXT", "IMAGE"],
+                image_config=types.ImageConfig(aspect_ratio="1:1"),
+            ),
         )
-        
-        if not images:
-            print(f"No images generated for product: {row_data['name']}")
-            return None
-            
-        # Return the first image from the list
-        return images[0]
+
+        for candidate in response.candidates or []:
+            if not candidate.content:
+                continue
+            for part in candidate.content.parts or []:
+                if part.inline_data and part.inline_data.data:
+                    return GeneratedImage(
+                        image_bytes=part.inline_data.data,
+                        mime_type=part.inline_data.mime_type or "image/png",
+                    )
+
+        print(f"No images generated for product: {row_data['name']}")
+        return None
     except Exception as e:
         print(f"Error generating image for product {row_data['name']}: {str(e)}")
         print(f"Prompt used: {prompt}")
-        return None 
+        return None

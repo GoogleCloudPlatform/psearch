@@ -59,7 +59,7 @@ def upload_to_gcs(image, filename):
     storage_client = storage.Client()
     bucket = storage_client.bucket(os.getenv('psearch_img_bucket'))
     blob = bucket.blob(filename)
-    blob.upload_from_string(image._image_bytes)
+    blob.upload_from_string(image.image_bytes)
     return f"gs://{os.getenv('psearch_img_bucket')}/{filename}"
 
 def process_single_product(row):
@@ -80,7 +80,7 @@ def process_single_product(row):
             raise Exception("Failed to generate image")
             
         # Get image description using Gemini client - Updated to pass product_data
-        description = get_image_description(image._image_bytes, PROJECT_ID, row_data)
+        description = get_image_description(image.image_bytes, PROJECT_ID, row_data)
         if not description:
             raise Exception("Failed to generate description")
         
