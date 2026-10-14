@@ -45,6 +45,9 @@ type SearchResponse struct {
 	Locale           string         `json:"locale,omitempty"`         // locale filter applied ("" = all)
 	ExpandedTerms    []string       `json:"expanded_terms,omitempty"` // synonyms added at reduced weight (Issue #7)
 	AppliedRules     []string       `json:"applied_rules,omitempty"`  // merchandising rule_ids applied (Issue #6)
+	LTR              bool           `json:"ltr,omitempty"`            // stage-2 re-ranking applied (Issue #10)
+	LTRLatencyUS     int64          `json:"ltr_latency_us,omitempty"` // stage-2 in-memory latency (microseconds)
+	LTRModel         string         `json:"ltr_model,omitempty"`
 }
 
 type FacetBucket struct {

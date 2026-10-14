@@ -21,6 +21,7 @@ type Config struct {
 	GeminiEmbeddingDimension int     // output_dimensionality requested from the embedding model (ADR-001: 1024)
 	EmbeddingDimension       int     // dimension of the ACTIVE vector column (v1=768 legacy, v2=GeminiEmbeddingDimension)
 	ActiveEmbeddingVersion   string  // initial version from env; use ActiveVersion() at runtime
+	LTRModelJSON             string  // optional learned LTR model (BigQuery ML export); empty = baseline
 	BoostWeight              float64 // scale of the 8-signal boost added to RRF (ADR-004); 0 disables
 	TextFolding              bool    // use accent-folded tokenlists (migration 014b) so "tenis" matches "Tênis" (Issue #4)
 	AdminToken               string  // guards POST /api/config/embedding-version (empty = disabled)
@@ -49,6 +50,7 @@ func Load() (*Config, error) {
 		AdminToken:               os.Getenv("ADMIN_TOKEN"),
 		TextFolding:              getEnv("TEXT_FOLDING", "false") == "true",
 		BoostWeight:              0.002,
+		LTRModelJSON:             os.Getenv("LTR_MODEL_JSON"),
 		DefaultAlpha:             0.5,
 		DefaultLimit:             20,
 		MinScoreValue:            0.0,

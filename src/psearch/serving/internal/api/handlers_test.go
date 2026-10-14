@@ -408,3 +408,46 @@ func TestDeliveryPromiseSearch(t *testing.T) {
 		t.Fatal("no CEP => no delivery promise")
 	}
 }
+
+// Issue #9: /api/autocomplete endpoint.
+func TestAutocompleteEndpoint(t *testing.T) {
+	r := newTestRouter()
+	req := httptest.NewRequest(http.MethodGet, "/api/autocomplete?q=geladei&locale=pt-BR", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	var resp struct {
+		Suggestions []struct {
+			Text string `json:"text"`
+		} `json:"suggestions"`
+		LatencyMs float64 `json:"latency_ms"`
+	}
+	if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &resp) != nil || len(resp.Suggestions) == 0 || !strings.HasPrefix(resp.Suggestions[0].Text, "geladeira") {
+		t.Fatalf("autocomplete: %d %s", w.Code, w.Body.String())
+	}
+	req = httptest.NewRequest(http.MethodGet, "/api/autocomplete?q="+strings.Repeat("x", 101), nil)
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("long q = %d, want 400", w.Code)
+	}
+}
+
+// Issue #10: ?ltr=true returns stage ranks, ltr_score and latency; limit still applies.
+func TestLTRSearch(t *testing.T) {
+	r := newTestRouter()
+	resp := doSearch(t, r, "q=shoes&limit=5&ltr=true")
+	if !resp.LTR || resp.LTRModel == "" || len(resp.Results) != 5 {
+		t.Fatalf("ltr=%v model=%q results=%d", resp.LTR, resp.LTRModel, len(resp.Results))
+	}
+	for i, res := range resp.Results {
+		if res.Score["stage2_rank"] != float64(i+1) || res.Score["stage1_rank"] == 0 {
+			t.Fatalf("%s ranks %v", res.ID, res.Score)
+		}
+		if _, ok := res.Score["ltr_score"]; !ok {
+			t.Fatalf("%s missing ltr_score", res.ID)
+		}
+	}
+	if plain := doSearch(t, r, "q=shoes&limit=5"); plain.LTR || plain.Results[0].Score["ltr_score"] != 0 {
+		t.Fatal("ltr must be opt-in")
+	}
+}
