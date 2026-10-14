@@ -25,7 +25,7 @@ func TestMemoryFacets(t *testing.T) {
 	for _, p := range svc.seedProducts {
 		ids = append(ids, p.ID)
 	}
-	f, err := svc.Facets(context.Background(), ids)
+	f, err := svc.Facets(context.Background(), ids, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +52,7 @@ func TestMemoryFacets(t *testing.T) {
 	if got["OUT_OF_STOCK"] != 2 || got["IN_STOCK"] != 13 {
 		t.Errorf("availability facet = %v, want OUT_OF_STOCK=2 IN_STOCK=13", got)
 	}
-	if empty, _ := svc.Facets(context.Background(), nil); len(empty.Categories) != 0 || empty.Categories == nil {
+	if empty, _ := svc.Facets(context.Background(), nil, "", ""); len(empty.Categories) != 0 || empty.Categories == nil {
 		t.Error("empty ids must give empty (non-nil) facet groups")
 	}
 }

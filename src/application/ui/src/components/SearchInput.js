@@ -38,6 +38,7 @@ import SearchIcon from '@mui/icons-material/Search';
 // and provides controls for alpha (hybrid weight), channel, and availability
 const SearchInput = memo(({
     onSearch,
+    query: controlledQuery,
     alpha: controlledAlpha,
     setAlpha: controlledSetAlpha,
     channel: controlledChannel,
@@ -52,8 +53,20 @@ const SearchInput = memo(({
     setMaxSla24h: controlledSetMaxSla24h,
     ltr: controlledLtr,
     setLtr: controlledSetLtr,
+    parseIntent: controlledParseIntent,
+    setParseIntent: controlledSetParseIntent,
+    priceTableId: controlledPriceTableId,
+    setPriceTableId: controlledSetPriceTableId,
+    sortBy: controlledSortBy,
+    setSortBy: controlledSetSortBy,
 }) => {
-    const [inputValue, setInputValue] = useState('');
+    const [inputValue, setInputValue] = useState(controlledQuery || '');
+
+    useEffect(() => {
+        if (controlledQuery !== undefined) {
+            setInputValue(controlledQuery);
+        }
+    }, [controlledQuery]);
     const [internalAlpha, setInternalAlpha] = useState(0.5);
     const [internalChannel, setInternalChannel] = useState('');
     const [internalOnlyInStock, setInternalOnlyInStock] = useState(false);
@@ -62,6 +75,9 @@ const SearchInput = memo(({
     const [internalCep, setInternalCep] = useState('');
     const [internalMaxSla24h, setInternalMaxSla24h] = useState(false);
     const [internalLtr, setInternalLtr] = useState(false);
+    const [internalParseIntent, setInternalParseIntent] = useState(true);
+    const [internalPriceTableId, setInternalPriceTableId] = useState('');
+    const [internalSortBy, setInternalSortBy] = useState('');
     const [cepError, setCepError] = useState('');
     const [suggestions, setSuggestions] = useState([]);
     const [isOpen, setIsOpen] = useState(false);
@@ -84,6 +100,12 @@ const SearchInput = memo(({
     const setMaxSla24h = controlledSetMaxSla24h || setInternalMaxSla24h;
     const ltr = controlledLtr !== undefined ? controlledLtr : internalLtr;
     const setLtr = controlledSetLtr || setInternalLtr;
+    const parseIntent = controlledParseIntent !== undefined ? controlledParseIntent : internalParseIntent;
+    const setParseIntent = controlledSetParseIntent || setInternalParseIntent;
+    const priceTableId = controlledPriceTableId !== undefined ? controlledPriceTableId : internalPriceTableId;
+    const setPriceTableId = controlledSetPriceTableId || setInternalPriceTableId;
+    const sortBy = controlledSortBy !== undefined ? controlledSortBy : internalSortBy;
+    const setSortBy = controlledSetSortBy || setInternalSortBy;
 
     // Local slider value for responsive dragging
     const [localAlpha, setLocalAlpha] = useState(alpha);
@@ -152,6 +174,9 @@ const SearchInput = memo(({
             cep,
             maxSla24h,
             ltr,
+            parseIntent,
+            priceTableId,
+            sortBy,
         });
     };
 
@@ -185,7 +210,10 @@ const SearchInput = memo(({
             locale,
             cep,
             maxSla24h,
-            ltr
+            ltr,
+            parseIntent,
+            priceTableId,
+            sortBy,
         });
     };
 
@@ -366,6 +394,39 @@ const SearchInput = memo(({
                     </Select>
                 </FormControl>
 
+                {/* Tabela de Preço Selector */}
+                <FormControl size="small" sx={{ minWidth: 160 }}>
+                    <InputLabel id="price-table-select-label">Tabela de preço</InputLabel>
+                    <Select
+                        labelId="price-table-select-label"
+                        id="price-table-select"
+                        value={priceTableId}
+                        label="Tabela de preço"
+                        onChange={(e) => setPriceTableId(e.target.value)}
+                    >
+                        <MenuItem value="">Varejo Padrão</MenuItem>
+                        <MenuItem value="b2b-corporate">B2B Corporate</MenuItem>
+                        <MenuItem value="b2b-gold">B2B Gold</MenuItem>
+                        <MenuItem value="vip-club">VIP Club</MenuItem>
+                    </Select>
+                </FormControl>
+
+                {/* Ordenar por Selector */}
+                <FormControl size="small" sx={{ minWidth: 150 }}>
+                    <InputLabel id="sort-by-select-label">Ordenar por</InputLabel>
+                    <Select
+                        labelId="sort-by-select-label"
+                        id="sort-by-select"
+                        value={sortBy}
+                        label="Ordenar por"
+                        onChange={(e) => setSortBy(e.target.value)}
+                    >
+                        <MenuItem value="">Relevância</MenuItem>
+                        <MenuItem value="price_asc">Menor preço</MenuItem>
+                        <MenuItem value="price_desc">Maior preço</MenuItem>
+                    </Select>
+                </FormControl>
+
                 {/* CEP Input */}
                 <TextField
                     size="small"
@@ -414,6 +475,18 @@ const SearchInput = memo(({
                         />
                     }
                     label="Re-rank (LTR)"
+                />
+
+                {/* Smart query Toggle */}
+                <FormControlLabel
+                    control={
+                        <Switch
+                            checked={Boolean(parseIntent)}
+                            onChange={(e) => setParseIntent(e.target.checked)}
+                            color="primary"
+                        />
+                    }
+                    label="Smart query"
                 />
             </Box>
         </Paper>

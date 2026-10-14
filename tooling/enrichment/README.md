@@ -86,7 +86,7 @@ The tool consists of several components:
 
 - **main.py**: Orchestrates the enrichment process
 - **imagen_client.py**: Handles product image generation with Gemini image models (`gemini-3.1-flash-image`) via the Google Gen AI SDK
-- **gemini_client.py**: Generates descriptions with Gemini (`gemini-3.5-flash`) via the Google Gen AI SDK (`GENAI_LOCATION=global`)
+- **gemini_client.py**: Generates descriptions with Gemini (`gemini-3.8-flash`) via the Google Gen AI SDK (`GENAI_LOCATION=global`)
 - **firestore_client.py**: Manages state and progress tracking
 - **consolidate_results.py**: Consolidates results from BigQuery and Firestore
 

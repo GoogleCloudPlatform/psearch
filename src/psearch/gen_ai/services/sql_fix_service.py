@@ -33,19 +33,19 @@ class SQLFixService:
     Service for validating and fixing SQL errors using refactored components.
     """
     
-    def __init__(self, project_id: str, location: str = "us-central1", model_name: Optional[str] = None, use_genai_for_diff_analysis: bool = True):
+    def __init__(self, project_id: str, location: str = "global", model_name: Optional[str] = None, use_genai_for_diff_analysis: bool = True):
         """
         Initialize the SQL Fix service with refactored components.
         
         Args:
             project_id: The Google Cloud Project ID.
-            location: The GCP region (e.g., us-central1).
-            model_name: Optional. The Gemini model name for fixer and analyzer.
+            location: The GCP region (e.g., global).
+            model_name: Optional. The Gemini model name for fixer and analyzer (default: gemini-4-pro).
             use_genai_for_diff_analysis: Whether the DiffAnalyzer should use GenAI.
         """
         self.project_id = project_id
         self.location = location
-        self.model_name = model_name # Will be passed to components that need it
+        self.model_name = model_name or os.environ.get("GEMINI_PRO_MODEL", "gemini-4-pro")
 
         self.validator = SQLValidator(project_id=self.project_id)
         self.fixer = SQLFixer(
