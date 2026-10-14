@@ -249,3 +249,53 @@ func TestEmbeddingVersionEndpoint(t *testing.T) {
 		t.Fatal("/api/info must include embedding_cache stats")
 	}
 }
+
+// facets are returned, computed over the candidate set, while results are truncated to limit.
+func TestSearchReturnsFacetsAndTruncates(t *testing.T) {
+	r := newTestRouter()
+	resp := doSearch(t, r, "q=shoes&limit=3")
+	if len(resp.Results) != 3 || resp.TotalFound != 3 {
+		t.Fatalf("results = %d (total_found %d), want 3", len(resp.Results), resp.TotalFound)
+	}
+	if resp.Facets == nil || len(resp.Facets.Categories) == 0 || len(resp.Facets.Brands) == 0 || len(resp.Facets.PriceRanges) == 0 || len(resp.Facets.Availability) == 0 {
+		t.Fatalf("expected 4 non-empty facet groups, got %+v", resp.Facets)
+	}
+	var n int64
+	for _, b := range resp.Facets.Availability {
+		n += b.Count
+	}
+	if n != int64(resp.Candidates) || resp.Candidates <= 3 {
+		t.Fatalf("facet counts (%d) must cover the candidate set (%d), wider than the page", n, resp.Candidates)
+	}
+}
+
+// tenant, locale, category and brand filters; accent-insensitive matching.
+func TestCatalogFiltersLocaleTenantCategoryBrand(t *testing.T) {
+	r := newTestRouter()
+	pt := doSearch(t, r, "q=notebook&limit=15&locale=pt-BR")
+	for _, res := range pt.Results {
+		if res.Locale != "pt-BR" {
+			t.Fatalf("locale=pt-BR returned %s (%s)", res.ID, res.Locale)
+		}
+	}
+	if len(pt.Results) == 0 || pt.Locale != "pt-BR" || pt.TenantID != "default" {
+		t.Fatalf("pt-BR search: %d results, locale=%q tenant=%q", len(pt.Results), pt.Locale, pt.TenantID)
+	}
+	if other := doSearch(t, r, "q=shoes&tenant_id=acme"); len(other.Results) != 0 {
+		t.Fatalf("unknown tenant must not see default catalog, got %d results", len(other.Results))
+	}
+	cat := doSearch(t, r, "q=shoes&limit=15&category=footwear")
+	for _, res := range cat.Results {
+		if len(res.Categories) == 0 || !strings.EqualFold(res.Categories[0], "Footwear") {
+			t.Fatalf("category=footwear returned %s %v", res.ID, res.Categories)
+		}
+	}
+	brand := doSearch(t, r, "q=shoes&limit=15&brand=Nike")
+	if len(brand.Results) != 1 || brand.Results[0].ID != "prod-003" {
+		t.Fatalf("brand=Nike: %s", ids(brand.Results))
+	}
+	folded := doSearch(t, r, "q=tenis&limit=15&alpha=0")
+	if len(folded.Results) == 0 || folded.Results[0].ID != "prod-002" {
+		t.Fatalf("accent-insensitive 'tenis' should rank 'Tênis...' (prod-002) first at alpha=0: %s", ids(folded.Results))
+	}
+}

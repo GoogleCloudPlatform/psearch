@@ -90,6 +90,13 @@
     font-weight: 400;
 }
 
+.filter-count {
+    color: #64748b;
+    font-size: 13px;
+    margin-left: 4px;
+    font-weight: normal;
+}
+
 .see-more {
     background: none;
     border: none;

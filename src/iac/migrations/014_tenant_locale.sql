@@ -1,0 +1,2 @@
+ALTER TABLE products ADD COLUMN tenant_id STRING(64);
+ALTER TABLE products ADD COLUMN locale STRING(16)
