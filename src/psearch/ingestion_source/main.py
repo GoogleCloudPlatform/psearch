@@ -13,7 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import csv
 from datetime import datetime
+import json
 import logging
 import os
 import re
@@ -35,7 +37,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from google.api_core.exceptions import BadRequest, NotFound
 from google.cloud import bigquery
-from pydantic import BaseModel, field_validator
+import pandas as pd
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .auth import require_auth
 from .services.bigquery_service import BigQueryService
@@ -63,6 +66,30 @@ logger = logging.getLogger(__name__)
 jobs: Dict[str, Dict[str, Any]] = {}
 
 
+def _is_os_permission_error(exc: PermissionError) -> bool:
+    """Distinguish OS/filesystem PermissionError (OSError) from policy PermissionError."""
+    return (
+        getattr(exc, "errno", None) is not None
+        or getattr(exc, "filename", None) is not None
+    )
+
+
+def _sanitize_bq_bad_request_message(exc: BadRequest) -> str:
+    """Return user-actionable SQL validation message stripped of internal REST URLs."""
+    raw = (getattr(exc, "message", None) or "").strip()
+    if not raw:
+        raw = str(exc).strip()
+    cleaned = re.sub(
+        r"^(?:\d{3}\s+)?(?:GET|POST|PUT|DELETE|PATCH)\s+https?://\S+?:\s*",
+        "",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"^\d{3}\s+", "", cleaned)
+    cleaned = re.sub(r"https?://\S+", "[redacted-url]", cleaned)
+    return cleaned.strip() or "SQL query validation failed."
+
+
 # Define models for API requests and responses
 class SchemaField(BaseModel):
     name: str
@@ -85,16 +112,20 @@ class DatasetRequest(BaseModel):
                 project_id=os.environ.get("PROJECT_ID"),
                 allow_project_prefix=True,
             )
-        except PermissionError:
+        except PermissionError as exc:
+            if _is_os_permission_error(exc):
+                raise
             # Defer allowlist policy errors to route handlers so they map to HTTP 403
             return value
         return value
 
 
 class TableRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     dataset_id: str
     table_id: str
-    schema: List[SchemaField]
+    schema_fields: List[SchemaField] = Field(..., alias="schema")
     description: Optional[str] = None
 
     @field_validator("dataset_id")
@@ -102,7 +133,9 @@ class TableRequest(BaseModel):
     def _validate_dataset_id_syntax(cls, value: str) -> str:
         try:
             return validate_dataset_id(value)
-        except PermissionError:
+        except PermissionError as exc:
+            if _is_os_permission_error(exc):
+                raise
             return value
 
     @field_validator("table_id")
@@ -128,7 +161,9 @@ class LoadJobRequest(BaseModel):
     def _validate_dataset_id_syntax(cls, value: str) -> str:
         try:
             return validate_dataset_id(value)
-        except PermissionError:
+        except PermissionError as exc:
+            if _is_os_permission_error(exc):
+                raise
             return value
 
     @field_validator("table_id")
@@ -273,28 +308,59 @@ async def upload_file(
 
     try:
         max_upload_bytes = get_max_upload_size_bytes()
-        content_length_raw = request.headers.get("content-length")
-        if content_length_raw is not None:
-            try:
-                content_length = int(content_length_raw.strip())
-                if content_length < 0:
-                    raise ValueError("Content-Length must be non-negative")
-            except ValueError as exc:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Invalid Content-Length header",
-                ) from exc
-            if content_length > max_upload_bytes:
-                raise HTTPException(
-                    status_code=413,
-                    detail="Uploaded file exceeds maximum allowed size",
-                )
+    except ValueError:
+        logger.error("Invalid MAX_UPLOAD_SIZE_BYTES server configuration", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="Internal server configuration error",
+        )
 
+    content_length_raw = request.headers.get("content-length")
+    if content_length_raw is not None:
+        try:
+            content_length = int(content_length_raw.strip())
+            if content_length < 0:
+                raise ValueError("Content-Length must be non-negative")
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid Content-Length header",
+            ) from exc
+        if content_length > max_upload_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail="Uploaded file exceeds maximum allowed size",
+            )
+
+    try:
         file_extension = validate_upload_filename(file.filename)
+    except ValueError as e:
+        logger.warning(f"Rejected invalid upload filename {file.filename}: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
 
+    try:
         file_id = str(uuid.uuid4())
         gcs_uri = await storage_service.upload_file(file, file_id)
-        schema = await schema_service.detect_schema(file, file_extension)
+
+        try:
+            schema = await schema_service.detect_schema(file, file_extension)
+        except UploadTooLargeError:
+            raise
+        except (
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            csv.Error,
+            pd.errors.ParserError,
+            pd.errors.EmptyDataError,
+            ValueError,
+        ) as parse_err:
+            logger.warning(
+                f"Malformed {file_extension} content in upload {file.filename}: {parse_err}"
+            )
+            raise HTTPException(
+                status_code=400,
+                detail="Malformed CSV or JSON file content.",
+            )
 
         return {
             "file_id": file_id,
@@ -310,10 +376,10 @@ async def upload_file(
         raise
     except UploadTooLargeError as e:
         logger.warning(f"Rejected oversized upload {file.filename}: {str(e)}")
-        raise HTTPException(status_code=413, detail=str(e))
-    except ValueError as e:
-        logger.warning(f"Rejected invalid upload {file.filename}: {str(e)}")
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(
+            status_code=413,
+            detail="Uploaded file exceeds maximum allowed size",
+        )
     except Exception:
         logger.error("Error processing upload", exc_info=True)
         raise HTTPException(
@@ -333,7 +399,17 @@ async def create_dataset(
 
     try:
         dataset_id = validate_dataset_id(request.dataset_id)
+    except PermissionError as e:
+        if _is_os_permission_error(e):
+            logger.error("OS PermissionError during dataset validation", exc_info=True)
+            raise HTTPException(
+                status_code=500, detail="Internal server error while creating dataset"
+            )
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
+    try:
         result = await bq_service.create_dataset(
             dataset_id=dataset_id,
             location=request.location,
@@ -350,10 +426,6 @@ async def create_dataset(
 
     except HTTPException:
         raise
-    except PermissionError as e:
-        raise HTTPException(status_code=403, detail=str(e))
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
     except Exception:
         logger.error("Error creating dataset", exc_info=True)
         raise HTTPException(
@@ -374,7 +446,18 @@ async def create_table(
     try:
         dataset_id = validate_dataset_id(request.dataset_id)
         table_id = validate_table_id(request.table_id)
-        schema_fields = [field.model_dump() for field in request.schema]
+    except PermissionError as e:
+        if _is_os_permission_error(e):
+            logger.error("OS PermissionError during table validation", exc_info=True)
+            raise HTTPException(
+                status_code=500, detail="Internal server error while creating table"
+            )
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    try:
+        schema_fields = [field.model_dump() for field in request.schema_fields]
 
         result = await bq_service.create_table(
             dataset_id=dataset_id,
@@ -389,15 +472,11 @@ async def create_table(
             "table_id": table_id,
             "created": result.get("created", True),
             "message": result.get("message", "Table created successfully"),
-            "schema_field_count": len(request.schema),
+            "schema_field_count": len(request.schema_fields),
         }
 
     except HTTPException:
         raise
-    except PermissionError as e:
-        raise HTTPException(status_code=403, detail=str(e))
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
     except Exception:
         logger.error("Error creating table", exc_info=True)
         raise HTTPException(
@@ -472,7 +551,20 @@ async def create_and_load_table(
             write_disposition,
             source_format,
         ) = _validate_load_inputs(request, file_id, file_type)
+    except HTTPException:
+        raise
+    except PermissionError as e:
+        if _is_os_permission_error(e):
+            logger.error("OS PermissionError during load validation", exc_info=True)
+            raise HTTPException(
+                status_code=500,
+                detail="Internal server error while initiating create and load job",
+            )
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
+    try:
         gcs_uri = storage_service.get_file_uri(validated_file_id, file_type_lower)
         if not gcs_uri:
             raise HTTPException(
@@ -530,10 +622,6 @@ async def create_and_load_table(
 
     except HTTPException:
         raise
-    except PermissionError as e:
-        raise HTTPException(status_code=403, detail=str(e))
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
     except Exception:
         logger.error("Error initiating create and load job", exc_info=True)
         raise HTTPException(
@@ -569,7 +657,19 @@ async def load_data(
             write_disposition,
             source_format,
         ) = _validate_load_inputs(request, file_id, file_type)
+    except HTTPException:
+        raise
+    except PermissionError as e:
+        if _is_os_permission_error(e):
+            logger.error("OS PermissionError during load validation", exc_info=True)
+            raise HTTPException(
+                status_code=500, detail="Internal server error while initiating load job"
+            )
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
+    try:
         gcs_uri = storage_service.get_file_uri(validated_file_id, file_type_lower)
         if not gcs_uri:
             raise HTTPException(
@@ -626,10 +726,6 @@ async def load_data(
 
     except HTTPException:
         raise
-    except PermissionError as e:
-        raise HTTPException(status_code=403, detail=str(e))
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
     except Exception:
         logger.error("Error initiating load job", exc_info=True)
         raise HTTPException(
@@ -689,7 +785,7 @@ async def dry_run_query(
         raise
     except BadRequest as e:
         logger.warning(f"SQL validation error: {str(e)}")
-        error_message = str(e)
+        error_message = _sanitize_bq_bad_request_message(e)
         error_details: Dict[str, Any] = {}
         if "Invalid field reference" in error_message:
             field_match = re.search(
@@ -706,10 +802,15 @@ async def dry_run_query(
 
     except NotFound as e:
         logger.warning(f"BigQuery Not Found error: {str(e)}")
-        error_message = str(e)
+        raw_not_found = (getattr(e, "message", None) or str(e)).strip()
         error_details = {"error_type": "not_found"}
+        error_message = "Referenced BigQuery dataset or table was not found."
 
-        dataset_match = re.search(r"Dataset ([^.\s]+\.[^.\s:]+) not found", error_message)
+        dataset_match = re.search(
+            r"Dataset\s+`?([A-Za-z0-9_-]+[:.][A-Za-z0-9_]+)`?\s+(?:was\s+)?not\s+found",
+            raw_not_found,
+            flags=re.IGNORECASE,
+        )
         if dataset_match:
             missing_ds = dataset_match.group(1)
             error_details["missing_dataset"] = missing_ds
@@ -719,7 +820,9 @@ async def dry_run_query(
             )
 
         table_match = re.search(
-            r"Table ([^.\s]+\.[^.\s]+\.[^.\s:]+) not found", error_message
+            r"Table\s+`?([A-Za-z0-9_-]+[:.][A-Za-z0-9_]+[:.][A-Za-z0-9_]+)`?\s+(?:was\s+)?not\s+found",
+            raw_not_found,
+            flags=re.IGNORECASE,
         )
         if table_match:
             missing_tbl = table_match.group(1)
@@ -738,9 +841,9 @@ async def dry_run_query(
     except Exception as e:
         logger.error("Error performing SQL dry run", exc_info=True)
         raw_message = str(e).lower()
-        error_type = type(e).__name__
 
         if "gateway timeout" in raw_message or "deadline exceeded" in raw_message:
+            error_category = "timeout"
             safe_message = (
                 "The query validation timed out. "
                 "Please try with a simpler query or increase the timeout."
@@ -749,17 +852,19 @@ async def dry_run_query(
             "unable to create a client" in raw_message
             or "could not automatically determine" in raw_message
         ):
+            error_category = "auth_error"
             safe_message = (
                 "Authentication error: Could not connect to Google Cloud. "
                 "Please check service credentials and permissions."
             )
         else:
+            error_category = "internal_error"
             safe_message = "Internal server error while performing SQL validation."
 
         return DryRunResponse(
             valid=False,
             error=safe_message,
-            details={"error_type": error_type},
+            details={"error_type": error_category},
         )
 
 
@@ -833,6 +938,20 @@ async def ensure_dataset_exists(
             project_id=os.environ.get("PROJECT_ID"),
             allow_project_prefix=True,
         )
+    except PermissionError as e:
+        if _is_os_permission_error(e):
+            logger.error(
+                "OS PermissionError during ensure-dataset validation", exc_info=True
+            )
+            raise HTTPException(
+                status_code=500,
+                detail="Internal server error while ensuring dataset exists",
+            )
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    try:
         result = await dataset_service.ensure_dataset_exists(
             dataset_id=dataset_id,
             location=request.location,
@@ -847,10 +966,6 @@ async def ensure_dataset_exists(
 
     except HTTPException:
         raise
-    except PermissionError as e:
-        raise HTTPException(status_code=403, detail=str(e))
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
     except Exception:
         logger.error("Error ensuring dataset exists", exc_info=True)
         raise HTTPException(
@@ -885,6 +1000,9 @@ def create_app() -> FastAPI:
         title="PSearch Source Ingestion API",
         description="API for ingesting data sources into BigQuery for PSearch",
         version="1.0.0",
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
     )
 
     origins = [
@@ -902,6 +1020,11 @@ def create_app() -> FastAPI:
 
     @application.exception_handler(PermissionError)
     async def _permission_error_handler(_request: Request, exc: PermissionError):
+        if _is_os_permission_error(exc):
+            logger.error("Unhandled OS PermissionError", exc_info=True)
+            return JSONResponse(
+                status_code=500, content={"detail": "Internal server error"}
+            )
         return JSONResponse(status_code=403, content={"detail": str(exc)})
 
     application.get("/")(root)

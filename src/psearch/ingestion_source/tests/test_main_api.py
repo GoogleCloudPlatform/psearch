@@ -16,11 +16,21 @@
 """FastAPI endpoint security, validation, CORS, and error-handling tests for ingestion_source."""
 
 from datetime import datetime, timezone
+import errno
 from typing import Any, Dict, Tuple
 from unittest.mock import MagicMock
 import uuid
+import warnings
 
-from fastapi.testclient import TestClient
+# Starlette 0.4x/1.0 emits StarletteDeprecationWarning (subclassing Warning, not
+# DeprecationWarning) on import when `httpx` rather than `httpx2` is installed.
+with warnings.catch_warnings():
+    warnings.filterwarnings(
+        "ignore",
+        message=r"Using `httpx` with `starlette\.testclient` is deprecated.*",
+        category=Warning,
+    )
+    from fastapi.testclient import TestClient
 from google.api_core.exceptions import BadRequest, NotFound
 from google.cloud import bigquery
 import pytest
@@ -131,6 +141,54 @@ def test_health_root_is_public(monkeypatch: pytest.MonkeyPatch):
         assert response.json()["status"] == "healthy"
     finally:
         app.dependency_overrides.clear()
+
+
+@pytest.mark.parametrize(
+    "doc_path",
+    ["/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"],
+)
+def test_openapi_and_docs_endpoints_are_not_publicly_served(
+    monkeypatch: pytest.MonkeyPatch,
+    doc_path: str,
+):
+    _clear_auth_env(monkeypatch)
+    app, _, _ = _build_test_app_and_mocks(monkeypatch)
+    try:
+        with TestClient(app) as client:
+            unauth_resp = client.get(doc_path)
+            assert unauth_resp.status_code == 404
+
+            monkeypatch.setenv("INGESTION_ADMIN_TOKEN", "topsecret")
+            no_header_resp = client.get(doc_path)
+            assert no_header_resp.status_code == 404
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_table_request_uses_schema_alias_without_shadowing_base_model(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.delenv("INGESTION_ALLOWED_DATASETS", raising=False)
+    assert "schema_fields" in ingestion_main.TableRequest.model_fields
+    assert "schema" not in ingestion_main.TableRequest.model_fields
+
+    from_alias = ingestion_main.TableRequest.model_validate(
+        {
+            "dataset_id": "raw_ds",
+            "table_id": "items",
+            "schema": [{"name": "id", "type": "STRING"}],
+        }
+    )
+    assert len(from_alias.schema_fields) == 1
+    assert from_alias.schema_fields[0].name == "id"
+
+    from_field_name = ingestion_main.TableRequest(
+        dataset_id="raw_ds",
+        table_id="items",
+        schema_fields=[ingestion_main.SchemaField(name="sku", type="STRING")],
+    )
+    assert len(from_field_name.schema_fields) == 1
+    assert from_field_name.schema_fields[0].name == "sku"
 
 
 _OPERATIONAL_ROUTES = [
@@ -579,8 +637,57 @@ def test_dry_run_not_found_and_error_sanitization(monkeypatch: pytest.MonkeyPatc
             assert nf_body["valid"] is False
             assert nf_body["details"]["missing_dataset"] == "proj.missing_ds"
 
-            # 2. BadRequest still surfaces syntax feedback cleanly
+            # 1b. Colon-qualified 'was not found' NotFound + unmatched NotFound fallback
+            mock_query_client.query.side_effect = NotFound(
+                "GET https://bigquery.googleapis.com/bigquery/v2/projects/secret-proj/datasets/missing_ds: "
+                "Not found: Dataset proj:missing_ds was not found in location US"
+            )
+            nf_colon_resp = client.post(
+                "/dry-run-query",
+                headers=auth_headers,
+                json={"sql_script": "SELECT * FROM `proj.missing_ds.tbl`"},
+            )
+            assert nf_colon_resp.status_code == 200
+            nf_colon_body = nf_colon_resp.json()
+            assert nf_colon_body["valid"] is False
+            assert nf_colon_body["details"]["missing_dataset"] == "proj:missing_ds"
+            assert "https://" not in nf_colon_body["error"]
+            assert "secret-proj" not in nf_colon_body["error"]
+
+            mock_query_client.query.side_effect = NotFound(
+                "Not found: Table proj:raw_ds.missing_tbl was not found in location US"
+            )
+            nf_tbl_resp = client.post(
+                "/dry-run-query",
+                headers=auth_headers,
+                json={"sql_script": "SELECT * FROM `proj.raw_ds.missing_tbl`"},
+            )
+            assert nf_tbl_resp.status_code == 200
+            assert (
+                nf_tbl_resp.json()["details"]["missing_table"]
+                == "proj:raw_ds.missing_tbl"
+            )
+
+            mock_query_client.query.side_effect = NotFound(
+                "GET https://bigquery.googleapis.com/bigquery/v2/projects/secret-proj/jobs/j99: "
+                "Resource was not found"
+            )
+            nf_unmatched_resp = client.post(
+                "/dry-run-query",
+                headers=auth_headers,
+                json={"sql_script": "SELECT 1"},
+            )
+            assert nf_unmatched_resp.status_code == 200
+            assert (
+                nf_unmatched_resp.json()["error"]
+                == "Referenced BigQuery dataset or table was not found."
+            )
+            assert "secret-proj" not in nf_unmatched_resp.json()["error"]
+            assert "https://" not in nf_unmatched_resp.json()["error"]
+
+            # 2. BadRequest surfaces syntax feedback cleanly while scrubbing raw REST URLs
             mock_query_client.query.side_effect = BadRequest(
+                "POST https://bigquery.googleapis.com/bigquery/v2/projects/secret-proj/jobs?prettyPrint=false: "
                 "Invalid field reference 'foo_col'"
             )
             br_resp = client.post(
@@ -591,8 +698,11 @@ def test_dry_run_not_found_and_error_sanitization(monkeypatch: pytest.MonkeyPatc
             assert br_resp.status_code == 200
             assert br_resp.json()["valid"] is False
             assert br_resp.json()["details"]["missing_field"] == "foo_col"
+            assert "https://" not in br_resp.json()["error"]
+            assert "secret-proj" not in br_resp.json()["error"]
+            assert not br_resp.json()["error"].startswith("400 ")
 
-            # 3. Unexpected internal exception in /dry-run-query does not leak raw secret details
+            # 3. Unexpected internal exception in /dry-run-query does not leak raw secret details or Python class names
             mock_query_client.query.side_effect = RuntimeError(
                 "secret-sa-key-path=/var/secrets/key.json"
             )
@@ -604,6 +714,18 @@ def test_dry_run_not_found_and_error_sanitization(monkeypatch: pytest.MonkeyPatc
             assert err_resp.status_code == 200
             assert err_resp.json()["valid"] is False
             assert "secret-sa-key-path" not in (err_resp.json().get("error") or "")
+            assert err_resp.json()["details"] == {"error_type": "internal_error"}
+
+            mock_query_client.query.side_effect = RuntimeError(
+                "504 Deadline Exceeded on internal-host.corp"
+            )
+            timeout_resp = client.post(
+                "/dry-run-query",
+                headers=auth_headers,
+                json={"sql_script": "SELECT 1"},
+            )
+            assert timeout_resp.json()["details"] == {"error_type": "timeout"}
+            assert "internal-host.corp" not in timeout_resp.json()["error"]
 
             # 4. Unexpected internal exception on 500 routes does not leak raw exception text
             broken_storage = MagicMock()
@@ -616,5 +738,103 @@ def test_dry_run_not_found_and_error_sanitization(monkeypatch: pytest.MonkeyPatc
             buckets_500 = client.get("/buckets", headers=auth_headers)
             assert buckets_500.status_code == 500
             assert "internal-cred-leak-98765" not in buckets_500.json()["detail"]
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_os_permission_errors_config_value_errors_and_malformed_uploads_are_sanitized(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv("INGESTION_ADMIN_TOKEN", "topsecret")
+    monkeypatch.delenv("INGESTION_ALLOWED_DATASETS", raising=False)
+    auth_headers = {"X-Admin-Token": "topsecret"}
+
+    app, _, _ = _build_test_app_and_mocks(monkeypatch, project_id="proj")
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            # 1. Malformed JSON/UTF-8 content in /upload returns fixed safe 400 detail
+            bad_json_resp = client.post(
+                "/upload",
+                headers=auth_headers,
+                files={
+                    "file": (
+                        "broken.json",
+                        b"{not valid json: /internal/path}",
+                        "application/json",
+                    )
+                },
+            )
+            assert bad_json_resp.status_code == 400
+            assert (
+                bad_json_resp.json()["detail"]
+                == "Malformed CSV or JSON file content."
+            )
+
+            bad_utf8_resp = client.post(
+                "/upload",
+                headers=auth_headers,
+                files={"file": ("broken.csv", b"\xff\xfe\x00\x00", "text/csv")},
+            )
+            assert bad_utf8_resp.status_code == 400
+            assert (
+                bad_utf8_resp.json()["detail"]
+                == "Malformed CSV or JSON file content."
+            )
+
+            # 2. Invalid server MAX_UPLOAD_SIZE_BYTES env var returns sanitized 500 (not 400)
+            app.dependency_overrides[ingestion_main.get_storage_service] = (
+                lambda: MagicMock()
+            )
+            app.dependency_overrides[ingestion_main.get_schema_detection_service] = (
+                lambda: MagicMock()
+            )
+            monkeypatch.setenv("MAX_UPLOAD_SIZE_BYTES", "broken-server-env")
+            bad_env_resp = client.post(
+                "/upload",
+                headers=auth_headers,
+                files={"file": ("ok.csv", b"id\n1\n", "text/csv")},
+            )
+            assert bad_env_resp.status_code == 500
+            assert "broken-server-env" not in bad_env_resp.json()["detail"]
+            monkeypatch.delenv("MAX_UPLOAD_SIZE_BYTES", raising=False)
+
+            # 3. OS PermissionError (errno=EACCES) inside services returns sanitized 500 (never 403!)
+            os_perm_err = PermissionError(
+                errno.EACCES, "Permission denied", "/var/secrets/sa-key.json"
+            )
+            broken_bq = MagicMock()
+            broken_bq.create_dataset.side_effect = os_perm_err
+            app.dependency_overrides[ingestion_main.get_bigquery_service] = (
+                lambda: broken_bq
+            )
+            ds_os_perm = client.post(
+                "/datasets",
+                headers=auth_headers,
+                json={"dataset_id": "raw_ds"},
+            )
+            assert ds_os_perm.status_code == 500
+            assert "/var/secrets/sa-key.json" not in ds_os_perm.json()["detail"]
+
+            # 4. Downstream internal ValueError inside services returns sanitized 500 (never 400!)
+            broken_bq.create_dataset.side_effect = ValueError(
+                "internal-sdk-parse-secret-xyz"
+            )
+            ds_val_err = client.post(
+                "/datasets",
+                headers=auth_headers,
+                json={"dataset_id": "raw_ds"},
+            )
+            assert ds_val_err.status_code == 500
+            assert "internal-sdk-parse-secret-xyz" not in ds_val_err.json()["detail"]
+
+            # 5. Global _permission_error_handler also treats OS PermissionError as sanitized 500
+            @app.get("/_test_os_perm")
+            async def _raise_os_perm():
+                raise os_perm_err
+
+            global_os_perm = client.get("/_test_os_perm")
+            assert global_os_perm.status_code == 500
+            assert "/var/secrets/sa-key.json" not in global_os_perm.json()["detail"]
     finally:
         app.dependency_overrides.clear()
