@@ -33,3 +33,14 @@ variable "dimensions" {
   type        = number
   default     = 768
 }
+
+variable "ingestion_source_invoker_members" {
+  description = "Explicit IAM principals granted roles/run.invoker on ingestion-source-service (defaults to none)"
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = !contains(var.ingestion_source_invoker_members, "allUsers") && !contains(var.ingestion_source_invoker_members, "allAuthenticatedUsers")
+    error_message = "Public principals (allUsers, allAuthenticatedUsers) are not permitted on ingestion-source-service."
+  }
+}

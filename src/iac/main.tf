@@ -160,7 +160,8 @@ module "ingestion_source" {
   source                = "./modules/ingestion_source"
   project_id            = var.project_id
   region                = var.region
-  service_account_email = module.iam.ingestion_service_account_email # TODO: Create a new Service Account for this service
+  service_account_email = module.iam.ingestion_source_service_account_email
+  invoker_members       = var.ingestion_source_invoker_members
 
   depends_on = [
     time_sleep.wait_for_iam

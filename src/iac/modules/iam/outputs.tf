@@ -22,3 +22,8 @@ output "embeddings_service_account_email" {
   description = "The email address of the embeddings service account"
   value       = google_service_account.embeddings_service_account.email
 }
+
+output "ingestion_source_service_account_email" {
+  description = "The email address of the dedicated ingestion source service account"
+  value       = google_service_account.ingestion_source_service_account.email
+}

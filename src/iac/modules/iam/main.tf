@@ -92,3 +92,37 @@ resource "google_project_iam_member" "compute_default_sa_permissions" {
   role    = each.key
   member  = "serviceAccount:${var.project_number}-compute@developer.gserviceaccount.com"
 }
+
+# Create a dedicated least-privilege service account for ingestion-source-service
+resource "google_service_account" "ingestion_source_service_account" {
+  account_id   = "ingestion-source-sa"
+  display_name = "Ingestion Source Service Account"
+  description  = "Dedicated least-privilege service account for ingestion-source-service"
+  project      = var.project_id
+}
+
+# Raw ingestion staging bucket scoped for ingestion-source-service uploads
+resource "google_storage_bucket" "psearch_raw" {
+  name                        = "${var.project_id}_psearch_raw"
+  project                     = var.project_id
+  location                    = "US"
+  uniform_bucket_level_access = true
+}
+
+resource "google_storage_bucket_iam_member" "ingestion_source_raw_bucket_admin" {
+  bucket = google_storage_bucket.psearch_raw.name
+  role   = "roles/storage.objectAdmin"
+  member = "serviceAccount:${google_service_account.ingestion_source_service_account.email}"
+}
+
+resource "google_project_iam_member" "grant_ingestion_source_sa_roles" {
+  for_each = toset([
+    "roles/bigquery.user",
+    "roles/logging.logWriter",
+    "roles/serviceusage.serviceUsageConsumer"
+  ])
+
+  role    = each.key
+  project = var.project_id
+  member  = "serviceAccount:${google_service_account.ingestion_source_service_account.email}"
+}
