@@ -343,6 +343,79 @@ def test_validate_dataset_id_rejects_cross_project_and_honors_allowlist(
         )
 
 
+def test_validate_dataset_id_accepts_same_project_colon_and_domain_scoped_prefixes(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.delenv("INGESTION_ALLOWED_DATASETS", raising=False)
+
+    # Same-project colon-qualified dataset (returned by BigQuery NotFound in /dry-run-query)
+    assert (
+        validation.validate_dataset_id(
+            "my-proj:raw_ds", project_id="my-proj", allow_project_prefix=True
+        )
+        == "raw_ds"
+    )
+
+    # Legacy domain-scoped project IDs ('example.com:my-proj') with '.' or ':' separator
+    assert (
+        validation.validate_dataset_id(
+            "example.com:my-proj.raw_ds",
+            project_id="example.com:my-proj",
+            allow_project_prefix=True,
+        )
+        == "raw_ds"
+    )
+    assert (
+        validation.validate_dataset_id(
+            "example.com:my-proj:raw_ds",
+            project_id="example.com:my-proj",
+            allow_project_prefix=True,
+        )
+        == "raw_ds"
+    )
+
+    # Disallowed when allow_project_prefix=False or project_id is missing/blank
+    with pytest.raises(ValueError):
+        validation.validate_dataset_id(
+            "my-proj:raw_ds", project_id="my-proj", allow_project_prefix=False
+        )
+    with pytest.raises(ValueError):
+        validation.validate_dataset_id(
+            "my-proj:raw_ds", project_id="   ", allow_project_prefix=True
+        )
+    with pytest.raises(ValueError):
+        validation.validate_dataset_id(
+            "my-proj:raw_ds", project_id=None, allow_project_prefix=True
+        )
+
+    # Cross-project or malformed colon/dot suffixes must raise ValueError
+    for bad_qualified in (
+        "other-proj:raw_ds",
+        "other-proj.raw_ds",
+        "my-proj:a.b",
+        "my-proj:a:b",
+        "my-proj:",
+        "example.com:other.raw_ds",
+    ):
+        with pytest.raises(ValueError):
+            validation.validate_dataset_id(
+                bad_qualified, project_id="my-proj", allow_project_prefix=True
+            )
+
+    # Allowlist is still enforced after stripping colon-qualified project prefix
+    monkeypatch.setenv("INGESTION_ALLOWED_DATASETS", "raw_ds")
+    assert (
+        validation.validate_dataset_id(
+            "my-proj:raw_ds", project_id="my-proj", allow_project_prefix=True
+        )
+        == "raw_ds"
+    )
+    with pytest.raises(PermissionError):
+        validation.validate_dataset_id(
+            "my-proj:secret_ds", project_id="my-proj", allow_project_prefix=True
+        )
+
+
 def test_validate_write_disposition_blocks_truncate_by_default(
     monkeypatch: pytest.MonkeyPatch,
 ):

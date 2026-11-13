@@ -107,11 +107,18 @@ resource "google_storage_bucket" "psearch_raw" {
   project                     = var.project_id
   location                    = "US"
   uniform_bucket_level_access = true
+  public_access_prevention    = "enforced"
 }
 
 resource "google_storage_bucket_iam_member" "ingestion_source_raw_bucket_admin" {
   bucket = google_storage_bucket.psearch_raw.name
   role   = "roles/storage.objectAdmin"
+  member = "serviceAccount:${google_service_account.ingestion_source_service_account.email}"
+}
+
+resource "google_storage_bucket_iam_member" "ingestion_source_raw_bucket_reader" {
+  bucket = google_storage_bucket.psearch_raw.name
+  role   = "roles/storage.legacyBucketReader"
   member = "serviceAccount:${google_service_account.ingestion_source_service_account.email}"
 }
 

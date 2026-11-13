@@ -15,6 +15,7 @@
 
 import csv
 from datetime import datetime
+import inspect
 import json
 import logging
 import os
@@ -64,6 +65,9 @@ logger = logging.getLogger(__name__)
 
 # In-memory storage for jobs (would be replaced with a database in production)
 jobs: Dict[str, Dict[str, Any]] = {}
+
+# Allowance for multipart/form-data boundaries and part headers on raw HTTP streams
+_MULTIPART_FRAMING_ALLOWANCE_BYTES = 64 * 1024
 
 
 def _is_os_permission_error(exc: PermissionError) -> bool:
@@ -326,7 +330,7 @@ async def upload_file(
                 status_code=400,
                 detail="Invalid Content-Length header",
             ) from exc
-        if content_length > max_upload_bytes:
+        if content_length > max_upload_bytes + _MULTIPART_FRAMING_ALLOWANCE_BYTES:
             raise HTTPException(
                 status_code=413,
                 detail="Uploaded file exceeds maximum allowed size",
@@ -339,9 +343,6 @@ async def upload_file(
         raise HTTPException(status_code=400, detail=str(e))
 
     try:
-        file_id = str(uuid.uuid4())
-        gcs_uri = await storage_service.upload_file(file, file_id)
-
         try:
             schema = await schema_service.detect_schema(file, file_extension)
         except UploadTooLargeError:
@@ -361,6 +362,9 @@ async def upload_file(
                 status_code=400,
                 detail="Malformed CSV or JSON file content.",
             )
+
+        file_id = str(uuid.uuid4())
+        gcs_uri = await storage_service.upload_file(file, file_id)
 
         return {
             "file_id": file_id,
@@ -994,6 +998,126 @@ async def list_buckets(
         )
 
 
+class _UploadGuardMiddleware:
+    """Pre-multipart ASGI guard on POST /upload enforcing auth and raw body caps."""
+
+    def __init__(self, app: Any, fastapi_app: Optional[FastAPI] = None):
+        self.app = app
+        self.fastapi_app = fastapi_app
+
+    async def __call__(self, scope: Dict[str, Any], receive: Any, send: Any) -> None:
+        if scope.get("type") != "http" or scope.get("method", "").upper() != "POST":
+            await self.app(scope, receive, send)
+            return
+
+        raw_path = scope.get("path", "")
+        root_path = scope.get("root_path", "")
+        route_path = (
+            raw_path[len(root_path) :]
+            if root_path and raw_path.startswith(root_path)
+            else raw_path
+        )
+        if route_path.rstrip("/") != "/upload":
+            await self.app(scope, receive, send)
+            return
+
+        request = Request(scope)
+        try:
+            auth_override = (
+                self.fastapi_app.dependency_overrides.get(require_auth)
+                if self.fastapi_app is not None
+                else None
+            )
+            if auth_override is not None:
+                maybe_coro = auth_override()
+                if inspect.isawaitable(maybe_coro):
+                    await maybe_coro
+            else:
+                require_auth(
+                    x_admin_token=request.headers.get("x-admin-token"),
+                    authorization=request.headers.get("authorization"),
+                )
+        except HTTPException as exc:
+            response = JSONResponse(
+                status_code=exc.status_code,
+                content={"detail": exc.detail},
+                headers=exc.headers,
+            )
+            await response(scope, receive, send)
+            return
+
+        try:
+            max_upload_bytes = get_max_upload_size_bytes()
+        except ValueError:
+            logger.error(
+                "Invalid MAX_UPLOAD_SIZE_BYTES server configuration",
+                exc_info=True,
+            )
+            response = JSONResponse(
+                status_code=500,
+                content={"detail": "Internal server configuration error"},
+            )
+            await response(scope, receive, send)
+            return
+
+        max_wire_bytes = max_upload_bytes + _MULTIPART_FRAMING_ALLOWANCE_BYTES
+
+        content_length_raw = request.headers.get("content-length")
+        if content_length_raw is not None:
+            try:
+                content_length = int(content_length_raw.strip())
+                if content_length < 0:
+                    raise ValueError("Content-Length must be non-negative")
+            except ValueError:
+                response = JSONResponse(
+                    status_code=400,
+                    content={"detail": "Invalid Content-Length header"},
+                )
+                await response(scope, receive, send)
+                return
+            if content_length > max_wire_bytes:
+                response = JSONResponse(
+                    status_code=413,
+                    content={"detail": "Uploaded file exceeds maximum allowed size"},
+                )
+                await response(scope, receive, send)
+                return
+
+        bytes_received = 0
+        response_started = False
+
+        async def guarded_send(message: Dict[str, Any]) -> None:
+            nonlocal response_started
+            if message.get("type") == "http.response.start":
+                response_started = True
+            await send(message)
+
+        async def counting_receive() -> Dict[str, Any]:
+            nonlocal bytes_received
+            message = await receive()
+            if message.get("type") == "http.request":
+                body = message.get("body", b"") or b""
+                bytes_received += len(body)
+                if bytes_received > max_wire_bytes:
+                    raise HTTPException(
+                        status_code=413,
+                        detail="Uploaded file exceeds maximum allowed size",
+                    )
+            return message
+
+        try:
+            await self.app(scope, counting_receive, guarded_send)
+        except HTTPException as exc:
+            if response_started:
+                raise
+            response = JSONResponse(
+                status_code=exc.status_code,
+                content={"detail": exc.detail},
+                headers=exc.headers,
+            )
+            await response(scope, receive, send)
+
+
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application instance."""
     application = FastAPI(
@@ -1005,11 +1129,21 @@ def create_app() -> FastAPI:
         openapi_url=None,
     )
 
-    origins = [
+    raw_origins = [
         origin.strip()
         for origin in os.environ.get("ALLOWED_ORIGINS", "").split(",")
         if origin.strip()
     ]
+    origins: List[str] = []
+    for origin in raw_origins:
+        if origin == "*":
+            logger.warning(
+                "Ignoring wildcard '*' in ALLOWED_ORIGINS; explicit origins are required"
+            )
+            continue
+        origins.append(origin)
+
+    application.add_middleware(_UploadGuardMiddleware, fastapi_app=application)
     application.add_middleware(
         CORSMiddleware,
         allow_origins=origins,

@@ -533,6 +533,38 @@ def test_ensure_dataset_and_datasets_reject_cross_project_and_disallowed_dataset
             assert ensure_prefixed_ok.status_code == 200
             assert ensure_prefixed_ok.json()["dataset_id"] == "raw_ds"
 
+            # Colon-qualified same-project dataset (from /dry-run-query NotFound) succeeds on /ensure-dataset
+            ensure_colon_ok = client.post(
+                "/ensure-dataset",
+                headers=auth_headers,
+                json={"dataset_id": "proj:raw_ds"},
+            )
+            assert ensure_colon_ok.status_code == 200
+            assert ensure_colon_ok.json()["dataset_id"] == "raw_ds"
+
+            # Colon-qualified disallowed dataset returns 403; cross-project returns 400/422
+            ensure_colon_disallowed = client.post(
+                "/ensure-dataset",
+                headers=auth_headers,
+                json={"dataset_id": "proj:secret_ds"},
+            )
+            assert ensure_colon_disallowed.status_code == 403
+
+            ensure_colon_cross = client.post(
+                "/ensure-dataset",
+                headers=auth_headers,
+                json={"dataset_id": "evil-proj:raw_ds"},
+            )
+            assert ensure_colon_cross.status_code in {400, 422}
+
+            # /datasets continues to reject qualified dataset IDs
+            datasets_colon_rejected = client.post(
+                "/datasets",
+                headers=auth_headers,
+                json={"dataset_id": "proj:raw_ds"},
+            )
+            assert datasets_colon_rejected.status_code in {400, 422}
+
             # Simple allowed dataset on /datasets succeeds
             datasets_ok = client.post(
                 "/datasets",
@@ -541,6 +573,258 @@ def test_ensure_dataset_and_datasets_reject_cross_project_and_disallowed_dataset
             )
             assert datasets_ok.status_code == 200
             assert datasets_ok.json()["dataset_id"] == "raw_ds"
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_cors_rejects_wildcard_star_origin_and_logs_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+):
+    # 1. ALLOWED_ORIGINS="*" must NOT allow wildcard reflection with credentials
+    monkeypatch.setenv("ALLOWED_ORIGINS", "*")
+    with caplog.at_level("WARNING"):
+        star_app = ingestion_main.create_app()
+    assert any("*" in rec.message for rec in caplog.records)
+
+    with TestClient(star_app) as client:
+        star_preflight = client.options(
+            "/buckets",
+            headers={
+                "Origin": "https://evil.example.com",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+        assert star_preflight.headers.get("access-control-allow-origin") is None
+        assert star_preflight.headers.get("access-control-allow-credentials") is None
+
+    # 2. ALLOWED_ORIGINS="*, https://ui.example.com" drops "*" while keeping explicit origin
+    monkeypatch.setenv("ALLOWED_ORIGINS", "*, https://ui.example.com")
+    mixed_app = ingestion_main.create_app()
+    with TestClient(mixed_app) as client:
+        evil_preflight = client.options(
+            "/buckets",
+            headers={
+                "Origin": "https://evil.example.com",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+        assert evil_preflight.headers.get("access-control-allow-origin") is None
+
+        ui_preflight = client.options(
+            "/buckets",
+            headers={
+                "Origin": "https://ui.example.com",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+        assert (
+            ui_preflight.headers.get("access-control-allow-origin")
+            == "https://ui.example.com"
+        )
+        assert ui_preflight.headers.get("access-control-allow-credentials") == "true"
+
+
+def test_upload_guard_enforces_auth_before_multipart_parse_and_caps_raw_stream(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import asyncio
+    import json as _json
+
+    app, mock_gcs_client, _ = _build_test_app_and_mocks(monkeypatch)
+    mock_blob = mock_gcs_client.lookup_bucket.return_value.blob.return_value
+    malformed_headers = {"Content-Type": "multipart/form-data; boundary=xyz"}
+
+    try:
+        with TestClient(app) as client:
+            # 1a. Unconfigured auth + malformed multipart -> 403 (never 400/422 from form parser)
+            _clear_auth_env(monkeypatch)
+            unconf_resp = client.post(
+                "/upload",
+                content=b"not-valid-multipart",
+                headers=malformed_headers,
+            )
+            assert unconf_resp.status_code == 403
+
+            # 1b. Missing credentials + malformed multipart -> 401 with WWW-Authenticate
+            monkeypatch.setenv("INGESTION_ADMIN_TOKEN", "topsecret")
+            missing_resp = client.post(
+                "/upload",
+                content=b"not-valid-multipart",
+                headers=malformed_headers,
+            )
+            assert missing_resp.status_code == 401
+            assert missing_resp.headers.get("www-authenticate") == "Bearer"
+
+            # 1c. Wrong X-Admin-Token + malformed multipart -> 403
+            wrong_resp = client.post(
+                "/upload",
+                content=b"not-valid-multipart",
+                headers={**malformed_headers, "X-Admin-Token": "wrong"},
+            )
+            assert wrong_resp.status_code == 403
+
+            # 2. Small MAX_UPLOAD_SIZE_BYTES=64 allows 16-byte CSV inside ~210-byte multipart
+            #    envelope (200) while still rejecting 100-byte CSV (413)
+            monkeypatch.setenv("MAX_UPLOAD_SIZE_BYTES", "64")
+            auth_headers = {"X-Admin-Token": "topsecret"}
+
+            tiny_ok = client.post(
+                "/upload",
+                headers=auth_headers,
+                files={"file": ("tiny.csv", b"id,name\n1,Alice\n", "text/csv")},
+            )
+            assert tiny_ok.status_code == 200
+            mock_blob.upload_from_filename.reset_mock()
+
+            hundred_byte_csv = b"id,name\n" + (b"1,Alice_Row\n" * 9)
+            assert len(hundred_byte_csv) > 64
+            over_file_cap = client.post(
+                "/upload",
+                headers=auth_headers,
+                files={"file": ("over.csv", hundred_byte_csv, "text/csv")},
+            )
+            assert over_file_cap.status_code == 413
+            mock_blob.upload_from_filename.assert_not_called()
+
+            # 3. Authenticated stream > max_bytes + 65536 aborts at ASGI layer with 413
+            #    BEFORE upload_file dependencies or handler ever execute
+            app.dependency_overrides[ingestion_main.get_storage_service] = (
+                lambda: (_ for _ in ()).throw(
+                    AssertionError("storage dependency must not run")
+                )
+            )
+            app.dependency_overrides[ingestion_main.get_schema_detection_service] = (
+                lambda: (_ for _ in ()).throw(
+                    AssertionError("schema dependency must not run")
+                )
+            )
+
+            huge_multipart = (
+                b"--xyz\r\n"
+                b'Content-Disposition: form-data; name="file"; filename="huge.csv"\r\n'
+                b"Content-Type: text/csv\r\n\r\n"
+                + (b"1,2\n" * 20000)
+                + b"\r\n--xyz--\r\n"
+            )
+            assert len(huge_multipart) > 64 + 65536
+
+            # 3a. Spoofed small Content-Length via TestClient -> 413 before dependencies run
+            spoofed_huge_resp = client.post(
+                "/upload",
+                content=huge_multipart,
+                headers={
+                    **auth_headers,
+                    "Content-Type": "multipart/form-data; boundary=xyz",
+                    "Content-Length": "32",
+                },
+            )
+            assert spoofed_huge_resp.status_code == 413
+            assert (
+                spoofed_huge_resp.json()["detail"]
+                == "Uploaded file exceeds maximum allowed size"
+            )
+
+        # 3b. Direct ASGI chunked stream stops pulling chunks as soon as raw bytes > 64 + 65536
+        chunks_pulled = 0
+        total_chunks = 50  # 50 * 8192 = 400 KiB
+
+        async def _run_raw_asgi_stream():
+            nonlocal chunks_pulled
+            sent_messages = []
+
+            async def receive():
+                nonlocal chunks_pulled
+                if chunks_pulled == 0:
+                    chunks_pulled += 1
+                    return {
+                        "type": "http.request",
+                        "body": (
+                            b"--xyz\r\n"
+                            b'Content-Disposition: form-data; name="file"; filename="huge.csv"\r\n'
+                            b"Content-Type: text/csv\r\n\r\n"
+                            + (b"a" * 8192)
+                        ),
+                        "more_body": True,
+                    }
+                if chunks_pulled < total_chunks:
+                    chunks_pulled += 1
+                    return {
+                        "type": "http.request",
+                        "body": b"a" * 8192,
+                        "more_body": chunks_pulled < total_chunks,
+                    }
+                return {"type": "http.request", "body": b"", "more_body": False}
+
+            async def send(message):
+                sent_messages.append(message)
+
+            scope = {
+                "type": "http",
+                "asgi": {"version": "3.0"},
+                "http_version": "1.1",
+                "method": "POST",
+                "scheme": "http",
+                "path": "/upload",
+                "raw_path": b"/upload",
+                "query_string": b"",
+                "headers": [
+                    (b"x-admin-token", b"topsecret"),
+                    (b"content-type", b"multipart/form-data; boundary=xyz"),
+                ],
+            }
+            await app(scope, receive, send)
+            return sent_messages
+
+        messages = asyncio.run(_run_raw_asgi_stream())
+        start_msg = next(m for m in messages if m["type"] == "http.response.start")
+        body_bytes = b"".join(
+            m.get("body", b"") for m in messages if m["type"] == "http.response.body"
+        )
+        assert start_msg["status"] == 413
+        assert (
+            _json.loads(body_bytes)["detail"]
+            == "Uploaded file exceeds maximum allowed size"
+        )
+        assert chunks_pulled <= 10, (
+            f"Expected ASGI stream guard to abort after ~9 chunks, pulled {chunks_pulled}"
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_upload_validates_schema_before_gcs_upload_and_rejects_non_object_json(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv("INGESTION_ADMIN_TOKEN", "topsecret")
+    monkeypatch.delenv("MAX_UPLOAD_SIZE_BYTES", raising=False)
+    auth_headers = {"X-Admin-Token": "topsecret"}
+
+    app, mock_gcs_client, _ = _build_test_app_and_mocks(monkeypatch)
+    mock_blob = mock_gcs_client.lookup_bucket.return_value.blob.return_value
+
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            for filename, payload, mime in (
+                ("broken.json", b"{not valid json}", "application/json"),
+                ("broken.csv", b"\xff\xfe\x00\x00", "text/csv"),
+                ("scalar_num.json", b"42", "application/json"),
+                ("scalar_str.json", b'"hello"', "application/json"),
+                ("scalar_null.json", b"null", "application/json"),
+                ("prim_array.json", b"[1, 2, 3]", "application/json"),
+                ("mixed_array.json", b'[{"id": 1}, "bad"]', "application/json"),
+            ):
+                resp = client.post(
+                    "/upload",
+                    headers=auth_headers,
+                    files={"file": (filename, payload, mime)},
+                )
+                assert resp.status_code == 400, (
+                    f"Expected 400 for {filename}, got {resp.status_code}: {resp.text}"
+                )
+                assert resp.json()["detail"] == "Malformed CSV or JSON file content."
+                mock_blob.upload_from_filename.assert_not_called()
     finally:
         app.dependency_overrides.clear()
 

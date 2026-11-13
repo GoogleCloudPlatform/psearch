@@ -270,6 +270,40 @@ def test_schema_detection_csv_samples_without_reading_entire_stream():
     with pytest.raises(validation.UploadTooLargeError):
         asyncio.run(bounded_svc.detect_schema(oversized_json, "json"))
 
+    # CSV schema detection also enforces max_upload_size_bytes when smaller than sample limit
+    oversized_csv = _CountingAsyncUploadFile(
+        "big.csv", b"id,name\n" + (b"1,widget_item_row\n" * 100)
+    )
+    with pytest.raises(validation.UploadTooLargeError):
+        asyncio.run(bounded_svc.detect_schema(oversized_csv, "csv"))
+
+
+def test_schema_detection_json_rejects_scalar_and_non_object_array_with_value_error():
+    svc = schema_detection_service.SchemaDetectionService()
+
+    for non_object_payload in (
+        b"42",
+        b'"just-a-string"',
+        b"true",
+        b"null",
+        b"[1, 2, 3]",
+        b'["a", "b"]',
+        b'[{"id": 1}, 42]',
+        b'[{"id": 1}, null]',
+    ):
+        bad_upload = _CountingAsyncUploadFile("invalid_shape.json", non_object_payload)
+        with pytest.raises(ValueError):
+            asyncio.run(svc.detect_schema(bad_upload, "json"))
+
+    # Empty JSON array remains valid with empty schema_fields
+    empty_array = _CountingAsyncUploadFile("empty.json", b"[]")
+    empty_detected = asyncio.run(svc.detect_schema(empty_array, "json"))
+    assert empty_detected == {
+        "schema_fields": [],
+        "row_count_estimate": 0,
+        "is_array": True,
+    }
+
 
 def test_dataset_service_rejects_cross_project_dataset(
     monkeypatch: pytest.MonkeyPatch,

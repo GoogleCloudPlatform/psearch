@@ -157,13 +157,29 @@ module "gen_ai" {
 }
 
 module "ingestion_source" {
-  source                = "./modules/ingestion_source"
-  project_id            = var.project_id
-  region                = var.region
-  service_account_email = module.iam.ingestion_source_service_account_email
-  invoker_members       = var.ingestion_source_invoker_members
+  source                       = "./modules/ingestion_source"
+  project_id                   = var.project_id
+  region                       = var.region
+  service_account_email        = module.iam.ingestion_source_service_account_email
+  invoker_members              = var.ingestion_source_invoker_members
+  ingestion_auth_audience      = var.ingestion_auth_audience
+  ingestion_allowed_principals = var.ingestion_allowed_principals
+  ingestion_allowed_domains    = var.ingestion_allowed_domains
+  allowed_origins              = var.ingestion_allowed_origins
+  max_upload_size_bytes        = var.ingestion_max_upload_size_bytes
 
   depends_on = [
     time_sleep.wait_for_iam
+  ]
+}
+
+resource "google_bigquery_dataset_iam_member" "ingestion_source_psearch_raw_editor" {
+  project    = var.project_id
+  dataset_id = "psearch_raw"
+  role       = "roles/bigquery.dataEditor"
+  member     = "serviceAccount:${module.iam.ingestion_source_service_account_email}"
+
+  depends_on = [
+    module.ingestion_spanner
   ]
 }

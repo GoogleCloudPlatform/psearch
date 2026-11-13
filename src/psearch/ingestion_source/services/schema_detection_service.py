@@ -95,7 +95,10 @@ class SchemaDetectionService:
         and trims any partial trailing line when truncated so pandas never parses a torn row.
         """
         try:
-            target_bytes = self.MAX_SCHEMA_SAMPLE_BYTES + 1
+            sample_limit = min(
+                self.MAX_SCHEMA_SAMPLE_BYTES, self.max_upload_size_bytes
+            )
+            target_bytes = sample_limit + 1
             chunks: List[bytes] = []
             bytes_collected = 0
             while bytes_collected < target_bytes:
@@ -107,6 +110,10 @@ class SchemaDetectionService:
                 bytes_collected += len(chunk)
 
             raw_sample = b"".join(chunks)
+            if len(raw_sample) > self.max_upload_size_bytes:
+                raise UploadTooLargeError(
+                    f"Uploaded file exceeds maximum allowed size of {self.max_upload_size_bytes} bytes"
+                )
             truncated = len(raw_sample) > self.MAX_SCHEMA_SAMPLE_BYTES
             if truncated:
                 raw_sample = raw_sample[: self.MAX_SCHEMA_SAMPLE_BYTES]
@@ -199,6 +206,10 @@ class SchemaDetectionService:
             json_data = json.loads(content)
 
             if isinstance(json_data, list):
+                if any(not isinstance(item, dict) for item in json_data):
+                    raise ValueError(
+                        "JSON array payload must contain only JSON objects"
+                    )
                 sample_size = min(len(json_data), self.MAX_ROWS_TO_SAMPLE)
                 sample = json_data[:sample_size]
                 row_count = len(json_data)
@@ -213,9 +224,13 @@ class SchemaDetectionService:
                     schema_fields = list(field_map.values())
                 else:
                     schema_fields = []
-            else:
+            elif isinstance(json_data, dict):
                 schema_fields = self._detect_json_object_schema(json_data)
                 row_count = 1
+            else:
+                raise ValueError(
+                    "JSON payload root must be a JSON object or array of objects"
+                )
 
             return {
                 "schema_fields": schema_fields,

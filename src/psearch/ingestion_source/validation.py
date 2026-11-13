@@ -104,19 +104,23 @@ def validate_dataset_id(
     if not isinstance(dataset_id, str) or not dataset_id:
         raise ValueError("dataset_id must be a non-empty string")
 
-    if "." in dataset_id:
-        expected_project = project_id.strip() if isinstance(project_id, str) else ""
-        if not allow_project_prefix or not expected_project:
+    if "." in dataset_id or ":" in dataset_id:
+        if not allow_project_prefix:
+            raise ValueError("Cross-project or qualified dataset_id is not allowed")
+        expected_project = (
+            project_id.strip() if isinstance(project_id, str) else ""
+        )
+        if not expected_project:
             raise ValueError(
-                "Project-qualified dataset_id is not allowed for this operation"
+                "Project-qualified dataset_id requires a configured project_id"
             )
-        parts = dataset_id.split(".")
-        if len(parts) != 2:
-            raise ValueError(f"Invalid dataset_id format: '{dataset_id}'")
-        prefix_project, simple_ds = parts
-        if prefix_project != expected_project:
+        if dataset_id.startswith(f"{expected_project}.") or dataset_id.startswith(
+            f"{expected_project}:"
+        ):
+            simple_ds = dataset_id[len(expected_project) + 1 :]
+        else:
             raise ValueError(
-                f"Dataset '{dataset_id}' references disallowed project '{prefix_project}'"
+                f"Dataset '{dataset_id}' does not match configured project '{expected_project}'"
             )
     else:
         simple_ds = dataset_id

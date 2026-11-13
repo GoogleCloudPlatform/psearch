@@ -81,6 +81,12 @@ variable "ingestion_allowed_principals" {
   default     = ""
 }
 
+variable "ingestion_allowed_domains" {
+  description = "Comma-separated allowlist of Google Workspace domains allowed to call ingestion-source-service"
+  type        = string
+  default     = ""
+}
+
 variable "allowed_origins" {
   description = "Comma-separated CORS allowed origins for ingestion-source-service"
   type        = string

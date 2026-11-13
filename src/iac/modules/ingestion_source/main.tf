@@ -99,6 +99,10 @@ resource "google_cloud_run_v2_service" "ingestion_source_service" {
         value = var.ingestion_allowed_principals
       }
       env {
+        name  = "INGESTION_ALLOWED_DOMAINS"
+        value = var.ingestion_allowed_domains
+      }
+      env {
         name  = "ALLOWED_ORIGINS"
         value = var.allowed_origins
       }
