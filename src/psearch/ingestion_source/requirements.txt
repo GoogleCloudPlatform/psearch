@@ -2,6 +2,7 @@
 google-cloud-bigquery>=3.11.4
 google-cloud-storage>=2.13.0
 google-auth>=2.27.0
+requests>=2.31.0
 
 # Web framework and API
 fastapi>=0.103.0
