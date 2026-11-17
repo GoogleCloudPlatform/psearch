@@ -77,6 +77,7 @@ locals {
 resource "google_cloud_run_v2_service" "gen_ai_service" {
   name     = local.service_name
   location = var.region
+  ingress  = var.ingress
 
   template {
     containers {
@@ -89,6 +90,22 @@ resource "google_cloud_run_v2_service" "gen_ai_service" {
       env {
         name  = "REGION"
         value = var.region
+      }
+      env {
+        name  = "GEN_AI_AUTH_AUDIENCE"
+        value = var.gen_ai_auth_audience
+      }
+      env {
+        name  = "GEN_AI_ALLOWED_PRINCIPALS"
+        value = var.gen_ai_allowed_principals
+      }
+      env {
+        name  = "GEN_AI_ALLOWED_DOMAINS"
+        value = var.gen_ai_allowed_domains
+      }
+      env {
+        name  = "ALLOWED_ORIGINS"
+        value = var.allowed_origins
       }
 
       resources {
@@ -120,23 +137,13 @@ resource "google_cloud_run_v2_service" "gen_ai_service" {
   deletion_protection = false
 }
 
-# Who may invoke the service.
-#
-# SECURITY: the default ("allUsers") makes /generate-sql reachable anonymously.
-# That endpoint spends money on every call (Gemini generation + BigQuery jobs),
-# so an unauthenticated deployment is exposed to LLM-proxying and
-# denial-of-wallet abuse even though the payloads themselves are now validated.
-# Set `gen_ai_invoker_members` to the UI service account (or an IAP/API-gateway
-# principal) for any environment that is not a throwaway demo.
-data "google_iam_policy" "noauth" {
-  binding {
-    role    = "roles/run.invoker"
-    members = var.invoker_members
-  }
-}
+# Grant Cloud Run invoker role only to explicitly configured principals
+resource "google_cloud_run_v2_service_iam_member" "invokers" {
+  for_each = toset(var.invoker_members)
 
-resource "google_cloud_run_v2_service_iam_policy" "noauth" {
-  location    = google_cloud_run_v2_service.gen_ai_service.location
-  name        = google_cloud_run_v2_service.gen_ai_service.name
-  policy_data = data.google_iam_policy.noauth.policy_data
+  project  = var.project_id
+  location = google_cloud_run_v2_service.gen_ai_service.location
+  name     = google_cloud_run_v2_service.gen_ai_service.name
+  role     = "roles/run.invoker"
+  member   = each.value
 }

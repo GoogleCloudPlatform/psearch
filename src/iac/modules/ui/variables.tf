@@ -84,3 +84,25 @@ variable "ingestion_source_url" {
   description = "The URL of the Ingestion Source service"
   type        = string
 }
+
+variable "invoker_members" {
+  description = "Explicit IAM principals granted roles/run.invoker on psearch-ui (defaults to none)"
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = !contains(var.invoker_members, "allUsers") && !contains(var.invoker_members, "allAuthenticatedUsers")
+    error_message = "Public principals (allUsers, allAuthenticatedUsers) are not permitted on psearch-ui."
+  }
+}
+
+variable "ingress" {
+  description = "Cloud Run ingress traffic setting for psearch-ui"
+  type        = string
+  default     = "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"
+
+  validation {
+    condition     = contains(["INGRESS_TRAFFIC_INTERNAL_ONLY", "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER", "INGRESS_TRAFFIC_ALL"], var.ingress)
+    error_message = "ingress must be one of INGRESS_TRAFFIC_INTERNAL_ONLY, INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER, or INGRESS_TRAFFIC_ALL."
+  }
+}

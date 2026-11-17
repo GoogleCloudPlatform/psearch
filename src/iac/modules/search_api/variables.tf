@@ -68,3 +68,55 @@ variable "spanner_database_id" {
   description = "The ID of the Spanner database"
   type        = string
 }
+
+variable "invoker_members" {
+  description = "Explicit IAM principals granted roles/run.invoker on product-search-api (defaults to none)"
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = !contains(var.invoker_members, "allUsers") && !contains(var.invoker_members, "allAuthenticatedUsers")
+    error_message = "Public principals (allUsers, allAuthenticatedUsers) are not permitted on product-search-api."
+  }
+}
+
+variable "ingress" {
+  description = "Cloud Run ingress traffic setting for product-search-api"
+  type        = string
+  default     = "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"
+
+  validation {
+    condition     = contains(["INGRESS_TRAFFIC_INTERNAL_ONLY", "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER", "INGRESS_TRAFFIC_ALL"], var.ingress)
+    error_message = "ingress must be one of INGRESS_TRAFFIC_INTERNAL_ONLY, INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER, or INGRESS_TRAFFIC_ALL."
+  }
+}
+
+variable "require_api_auth" {
+  description = "Whether Bearer OIDC authentication is required on product-search-api endpoints"
+  type        = string
+  default     = "true"
+}
+
+variable "serving_auth_audience" {
+  description = "Expected OIDC token audience for product-search-api Bearer authentication"
+  type        = string
+  default     = ""
+}
+
+variable "serving_allowed_principals" {
+  description = "Comma-separated allowlist of authenticated email principals allowed to call product-search-api"
+  type        = string
+  default     = ""
+}
+
+variable "serving_allowed_domains" {
+  description = "Comma-separated allowlist of Google Workspace domains allowed to call product-search-api"
+  type        = string
+  default     = ""
+}
+
+variable "allowed_origins" {
+  description = "Comma-separated CORS allowed origins for product-search-api"
+  type        = string
+  default     = ""
+}

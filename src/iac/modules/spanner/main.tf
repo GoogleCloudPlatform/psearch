@@ -48,9 +48,11 @@ resource "google_spanner_database" "products_db" {
   ]
 }
 
-# Grant service account access to Spanner
-resource "google_project_iam_member" "spanner_user" {
-  project = var.project_id
-  role    = "roles/spanner.databaseUser"
-  member  = "serviceAccount:${var.service_account_email}"
+# Grant service account database-scoped access to Spanner
+resource "google_spanner_database_iam_member" "spanner_user" {
+  project  = var.project_id
+  instance = google_spanner_instance.psearch_spanner.name
+  database = google_spanner_database.products_db.name
+  role     = "roles/spanner.databaseUser"
+  member   = "serviceAccount:${var.service_account_email}"
 }

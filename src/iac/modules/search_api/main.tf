@@ -77,6 +77,7 @@ locals {
 resource "google_cloud_run_v2_service" "search_api_service" {
   name     = local.service_name
   location = var.region
+  ingress  = var.ingress
 
   template {
     containers {
@@ -101,6 +102,26 @@ resource "google_cloud_run_v2_service" "search_api_service" {
       env {
         name  = "ENVIRONMENT"
         value = "production"
+      }
+      env {
+        name  = "REQUIRE_API_AUTH"
+        value = var.require_api_auth
+      }
+      env {
+        name  = "SERVING_AUTH_AUDIENCE"
+        value = var.serving_auth_audience
+      }
+      env {
+        name  = "SERVING_ALLOWED_PRINCIPALS"
+        value = var.serving_allowed_principals
+      }
+      env {
+        name  = "SERVING_ALLOWED_DOMAINS"
+        value = var.serving_allowed_domains
+      }
+      env {
+        name  = "ALLOWED_ORIGINS"
+        value = var.allowed_origins
       }
 
       resources {
@@ -128,18 +149,13 @@ resource "google_cloud_run_v2_service" "search_api_service" {
   deletion_protection = false
 }
 
-# Make the service public
-data "google_iam_policy" "noauth" {
-  binding {
-    role = "roles/run.invoker"
-    members = [
-      "allUsers",
-    ]
-  }
-}
+# Grant Cloud Run invoker role only to explicitly configured principals
+resource "google_cloud_run_v2_service_iam_member" "invokers" {
+  for_each = toset(var.invoker_members)
 
-resource "google_cloud_run_v2_service_iam_policy" "noauth" {
-  location    = google_cloud_run_v2_service.search_api_service.location
-  name        = google_cloud_run_v2_service.search_api_service.name
-  policy_data = data.google_iam_policy.noauth.policy_data
+  project  = var.project_id
+  location = google_cloud_run_v2_service.search_api_service.location
+  name     = google_cloud_run_v2_service.search_api_service.name
+  role     = "roles/run.invoker"
+  member   = each.value
 }
