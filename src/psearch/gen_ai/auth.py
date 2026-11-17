@@ -17,6 +17,7 @@
 
 import hmac
 import os
+import threading
 from typing import Any, Dict, Optional
 
 from fastapi import Header, HTTPException
@@ -27,7 +28,16 @@ from pydantic import BaseModel
 
 _GOOGLE_OIDC_ISSUERS = ("https://accounts.google.com", "accounts.google.com")
 _BEARER_CHALLENGE_HEADERS = {"WWW-Authenticate": "Bearer"}
-_GOOGLE_AUTH_REQUEST = google_requests.Request()
+_auth_request_local = threading.local()
+
+
+def _get_google_auth_request() -> google_requests.Request:
+    """Return a lazily initialized per-thread google.auth Request transport."""
+    request = getattr(_auth_request_local, "request", None)
+    if request is None:
+        request = google_requests.Request()
+        _auth_request_local.request = request
+    return request
 
 
 class AuthPrincipal(BaseModel):
@@ -41,7 +51,7 @@ def verify_bearer_token(token: str, audience: str) -> Dict[str, Any]:
     """Verify a Google OIDC Bearer token against Google's public certs and audience."""
     return id_token.verify_oauth2_token(
         token,
-        _GOOGLE_AUTH_REQUEST,
+        _get_google_auth_request(),
         audience=audience,
     )
 

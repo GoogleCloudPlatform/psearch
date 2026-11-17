@@ -15,10 +15,13 @@
 
 """Authentication, lazy DI initialization, CORS, validation, and sanitization tests for gen_ai."""
 
+from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path
 import subprocess
 import sys
+import threading
+import time
 from typing import Any, Dict, Tuple
 from unittest.mock import MagicMock
 import uuid
@@ -35,7 +38,9 @@ with warnings.catch_warnings():
     from fastapi.testclient import TestClient
 
 from fastapi import HTTPException
+from google.api_core.exceptions import BadRequest
 from google.auth.exceptions import GoogleAuthError
+from google.genai.types import FinishReason
 import pytest
 
 try:
@@ -322,7 +327,7 @@ def test_import_gen_ai_main_succeeds_without_gcp_credentials_or_project_id(
         )
 
     # In-process check: missing PROJECT_ID raises sanitized 500 when lazy factories are invoked
-    gen_ai_main._service_cache.clear()
+    gen_ai_main.clear_service_cache()
     monkeypatch.delenv("PROJECT_ID", raising=False)
     factories = (
         gen_ai_main.get_conversational_search_service,
@@ -349,7 +354,7 @@ def test_import_gen_ai_main_succeeds_without_gcp_credentials_or_project_id(
             second = factory()
             assert first is second
     finally:
-        gen_ai_main._service_cache.clear()
+        gen_ai_main.clear_service_cache()
 
 
 def test_health_routes_are_public_and_openapi_docs_are_disabled(
@@ -821,3 +826,285 @@ def test_task_status_validates_uuidv4_and_sql_endpoints_bound_length_and_sanitiz
             )
     finally:
         app.dependency_overrides.clear()
+
+
+def test_downstream_sdk_error_dicts_are_sanitized_without_breaking_expected_feedback(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Real downstream services catch SDK Exceptions into dicts; main.py must scrub str(e)."""
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv("GEN_AI_ADMIN_TOKEN", "secret")
+    monkeypatch.setenv("PROJECT_ID", "real-svc-proj")
+    monkeypatch.setenv("GENAI_LOCATION", "global")
+    auth_headers = {"X-Admin-Token": "secret"}
+
+    secret_marker = (
+        "https://aiplatform.googleapis.com/v1/projects/secret-proj?key=supersecret "
+        "vpc-sc-perimeter-token-999"
+    )
+
+    mock_genai_client = MagicMock()
+    mock_genai_client.models.generate_content.side_effect = RuntimeError(secret_marker)
+
+    mock_bq_client = MagicMock()
+    mock_bq_client.query.side_effect = RuntimeError(secret_marker)
+
+    monkeypatch.setattr("google.genai.Client", lambda **kwargs: mock_genai_client)
+    monkeypatch.setattr("google.cloud.bigquery.Client", lambda **kwargs: mock_bq_client)
+    gen_ai_main.clear_service_cache()
+
+    app = gen_ai_main.create_app()
+    try:
+        with TestClient(app) as client:
+            # 1. POST /enrichment: downstream SDK exception must not echo str(e)
+            enrichment_resp = client.post(
+                "/enrichment",
+                headers=auth_headers,
+                json={"product_id": "p1", "product_data": {"title": "Shoe"}},
+            )
+            assert "secret-proj" not in enrichment_resp.text
+            assert "vpc-sc-perimeter-token-999" not in enrichment_resp.text
+            assert "https://aiplatform.googleapis.com" not in enrichment_resp.text
+
+            # 2. POST /marketing: must NOT return 200 with fake content starting with
+            #    "Error generating marketing content: <str(e)>"
+            marketing_resp = client.post(
+                "/marketing",
+                headers=auth_headers,
+                json={
+                    "product_id": "p1",
+                    "product_data": {"title": "Shoe"},
+                    "content_type": "product_description",
+                },
+            )
+            assert marketing_resp.status_code == 500
+            assert (
+                marketing_resp.json()["detail"]
+                == "Internal server error while generating marketing content"
+            )
+            assert "secret-proj" not in marketing_resp.text
+            assert "vpc-sc-perimeter-token-999" not in marketing_resp.text
+
+            # 3a. POST /generate-enhanced-image: invalid 1-char base64 preserves safe client error
+            bad_b64_resp = client.post(
+                "/generate-enhanced-image",
+                headers=auth_headers,
+                json={
+                    "product_id": "p1",
+                    "product_data": {"title": "Shoe"},
+                    "image_base64": "A",
+                    "background_prompt": "studio",
+                },
+            )
+            assert bad_b64_resp.status_code == 200
+            assert bad_b64_resp.json()["error"] == "Invalid base64 image format"
+
+            # 3b. POST /generate-enhanced-image: Gemini SDK error scrubs str(e)
+            img_err_resp = client.post(
+                "/generate-enhanced-image",
+                headers=auth_headers,
+                json={
+                    "product_id": "p1",
+                    "product_data": {"title": "Shoe"},
+                    "image_base64": "YWJj",
+                    "background_prompt": "studio",
+                },
+            )
+            assert "secret-proj" not in img_err_resp.text
+            assert "vpc-sc-perimeter-token-999" not in img_err_resp.text
+            assert img_err_resp.json().get("error") == "Error generating enhanced image"
+
+            # 4a. POST /sql/simple-fix: GenAIClient SDK exception scrubs "Failed to generate content: <str(e)>"
+            simple_fix_err = client.post(
+                "/sql/simple-fix",
+                headers=auth_headers,
+                json={"sql_script": "SELECT 1", "error_message": "Syntax error"},
+            )
+            assert simple_fix_err.status_code == 200
+            assert simple_fix_err.json()["suggested_fixed_sql"] is None
+            assert "secret-proj" not in simple_fix_err.text
+            assert "vpc-sc-perimeter-token-999" not in simple_fix_err.text
+            assert "Failed to generate content:" not in (
+                simple_fix_err.json().get("error") or ""
+            )
+
+            # 5a. POST /sql/fix: GenAIClient SDK exception scrubs wrapped str(e)
+            fix_err = client.post(
+                "/sql/fix",
+                headers=auth_headers,
+                json={
+                    "original_sql": "SELECT bad FROM tbl",
+                    "current_sql": "SELECT bad FROM tbl",
+                    "error_message": "Unrecognized name: bad",
+                },
+            )
+            assert fix_err.status_code == 200
+            assert fix_err.json()["success"] is False
+            assert "secret-proj" not in fix_err.text
+            assert "vpc-sc-perimeter-token-999" not in fix_err.text
+            assert "Failed to generate content:" not in (
+                fix_err.json().get("error") or ""
+            )
+
+            # 6. POST /sql/analyze: GenAIClient SDK exception scrubs str(e) while keeping diff_text
+            analyze_err = client.post(
+                "/sql/analyze",
+                headers=auth_headers,
+                json={
+                    "original_sql": "SELECT bad FROM tbl",
+                    "fixed_sql": "SELECT NULL AS bad FROM tbl",
+                },
+            )
+            assert analyze_err.status_code == 200
+            assert "diff_text" in analyze_err.json()
+            assert "secret-proj" not in analyze_err.text
+            assert "vpc-sc-perimeter-token-999" not in analyze_err.text
+            assert "Failed to generate content:" not in (
+                analyze_err.json().get("error") or ""
+            )
+
+            # 4b & 5b. Model-level MAX_TOKENS truncation feedback is preserved on /sql/simple-fix and /sql/fix
+            truncated_candidate = MagicMock()
+            truncated_candidate.finish_reason = FinishReason.MAX_TOKENS
+            truncated_candidate.finish_message = None
+            truncated_response = MagicMock()
+            truncated_response.candidates = [truncated_candidate]
+            mock_genai_client.models.generate_content.side_effect = None
+            mock_genai_client.models.generate_content.return_value = truncated_response
+
+            simple_trunc = client.post(
+                "/sql/simple-fix",
+                headers=auth_headers,
+                json={"sql_script": "SELECT 1", "error_message": "Syntax error"},
+            )
+            assert simple_trunc.status_code == 200
+            assert (
+                simple_trunc.json()["error"]
+                == "Output truncated due to MAX_TOKENS limit."
+            )
+
+            fix_trunc = client.post(
+                "/sql/fix",
+                headers=auth_headers,
+                json={
+                    "original_sql": "SELECT bad FROM tbl",
+                    "current_sql": "SELECT bad FROM tbl",
+                    "error_message": "Unrecognized name: bad",
+                },
+            )
+            assert fix_trunc.status_code == 200
+            assert "Output truncated due to MAX_TOKENS limit." in (
+                fix_trunc.json()["error"] or ""
+            )
+
+            # 7a. POST /sql/validate: non-BadRequest exception in SQLValidator returns sanitized 500
+            val_unexpected = client.post(
+                "/sql/validate",
+                headers=auth_headers,
+                json={"sql_script": "SELECT 1"},
+            )
+            assert val_unexpected.status_code == 500
+            assert (
+                val_unexpected.json()["detail"]
+                == "Internal server error while validating SQL"
+            )
+            assert "secret-proj" not in val_unexpected.text
+            assert "vpc-sc-perimeter-token-999" not in val_unexpected.text
+            assert "RuntimeError" not in val_unexpected.text
+
+            # 7b. POST /sql/validate: BadRequest SQL feedback is preserved with REST URLs scrubbed
+            mock_bq_client.query.side_effect = BadRequest(
+                "POST https://bigquery.googleapis.com/bigquery/v2/projects/secret-proj/jobs?prettyPrint=false: "
+                "Unrecognized name: colorFamily [at 1:15]"
+            )
+            val_bad_req = client.post(
+                "/sql/validate",
+                headers=auth_headers,
+                json={"sql_script": "SELECT colorFamily FROM tbl"},
+            )
+            assert val_bad_req.status_code == 200
+            val_body = val_bad_req.json()
+            assert val_body["valid"] is False
+            assert "Unrecognized name: colorFamily [at 1:15]" in val_body["error_message"]
+            assert val_body["details"]["unrecognized_name"] == "colorFamily"
+            assert "https://bigquery.googleapis.com" not in val_bad_req.text
+            assert "secret-proj" not in val_bad_req.text
+    finally:
+        gen_ai_main.clear_service_cache()
+
+
+def test_thread_local_auth_request_and_locked_service_cache_concurrency(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Verify per-thread google_requests.Request isolation and locked singleton initialization."""
+    # 1. Per-thread Request transport isolation across 4 concurrent threads
+    barrier = threading.Barrier(4)
+    seen_lock = threading.Lock()
+    per_thread_requests: Dict[int, Tuple[Any, Any]] = {}
+
+    def fake_verify_oauth2(token: str, request_obj: Any, audience: str = None):
+        return {"request_obj": request_obj, "token": token, "audience": audience}
+
+    monkeypatch.setattr(auth.id_token, "verify_oauth2_token", fake_verify_oauth2)
+
+    def _worker_verify(idx: int) -> None:
+        barrier.wait(timeout=5)
+        first = auth.verify_bearer_token(f"t-{idx}-1", "https://gen-ai.run.app")[
+            "request_obj"
+        ]
+        second = auth.verify_bearer_token(f"t-{idx}-2", "https://gen-ai.run.app")[
+            "request_obj"
+        ]
+        with seen_lock:
+            per_thread_requests[idx] = (first, second)
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = [pool.submit(_worker_verify, i) for i in range(4)]
+        for fut in futures:
+            fut.result(timeout=5)
+
+    assert len(per_thread_requests) == 4
+    for first, second in per_thread_requests.values():
+        assert first is second
+    distinct_ids = {id(pair[0]) for pair in per_thread_requests.values()}
+    assert len(distinct_ids) == 4, (
+        "Expected each worker thread to hold its own google_requests.Request instance"
+    )
+
+    # 2. Double-checked locking around _service_cache under 8-thread cold-start contention
+    assert hasattr(gen_ai_main, "_service_cache_lock")
+    assert hasattr(gen_ai_main, "clear_service_cache")
+
+    monkeypatch.setenv("PROJECT_ID", "concurrent-proj")
+    monkeypatch.setenv("GENAI_LOCATION", "global")
+    gen_ai_main.clear_service_cache()
+
+    init_count = 0
+    init_count_lock = threading.Lock()
+    start_barrier = threading.Barrier(8)
+
+    class _SlowService:
+        def __init__(self, project_id: str, location: str):
+            nonlocal init_count
+            time.sleep(0.05)
+            with init_count_lock:
+                init_count += 1
+            self.project_id = project_id
+            self.location = location
+
+    monkeypatch.setattr(gen_ai_main, "ConversationalSearchService", _SlowService)
+
+    def _worker_get_service() -> Any:
+        start_barrier.wait(timeout=5)
+        return gen_ai_main.get_conversational_search_service()
+
+    try:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            instances = [
+                fut.result(timeout=5)
+                for fut in [pool.submit(_worker_get_service) for _ in range(8)]
+            ]
+        assert init_count == 1
+        assert len({id(inst) for inst in instances}) == 1
+    finally:
+        gen_ai_main.clear_service_cache()

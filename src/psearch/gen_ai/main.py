@@ -16,6 +16,8 @@
 import json
 import logging
 import os
+import re
+import threading
 from typing import Any, Callable, Dict, List, Optional, Tuple
 import uuid
 
@@ -59,6 +61,33 @@ logger = logging.getLogger(__name__)
 # Lazy per-(service, project_id, location) cache so importing gen_ai.main never
 # instantiates Vertex AI or BigQuery SDK clients at module import time.
 _service_cache: Dict[Tuple[str, str, str], Any] = {}
+_service_cache_lock = threading.Lock()
+
+_SAFE_ENRICHMENT_ERRORS = {"Failed to parse response"}
+_SAFE_IMAGE_ERRORS = {
+    "Invalid base64 image format",
+    "Gemini response did not contain valid image data",
+}
+_SAFE_SQL_GENAI_ERROR_PREFIXES = (
+    "No candidates in the GenAI response.",
+    "Output truncated due to MAX_TOKENS limit.",
+    "No SQL returned",
+    "SQL Fix: No function call and text response does not appear to be SQL.",
+    "Failed to obtain fixed SQL. Finish reason:",
+    "Final fixed SQL content after programmatic fixes does not appear to be a valid SQL query:",
+    "Simple SQL fix: No text response received. Finish reason:",
+    "Simple SQL fix: Could not extract valid SQL from GenAI response.",
+    "Final 'simple fixed' SQL content after programmatic fixes does not appear to be a valid SQL query:",
+    "Failed to parse function call arguments for diff analysis.",
+    "Model returned text instead of expected function call for diff analysis.",
+    "No function call or text response for SQL diff analysis. Finish reason:",
+)
+
+
+def clear_service_cache() -> None:
+    """Clear cached lazy service instances in a thread-safe manner."""
+    with _service_cache_lock:
+        _service_cache.clear()
 
 
 def _get_project_and_location() -> Tuple[str, str]:
@@ -84,18 +113,22 @@ def _get_or_create_service(
     cached = _service_cache.get(cache_key)
     if cached is not None:
         return cached
-    try:
-        instance = builder(project_id, location)
-    except HTTPException:
-        raise
-    except Exception:
-        logger.error("Failed to initialize %s", service_label, exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Internal server error initializing {service_label}",
-        )
-    _service_cache[cache_key] = instance
-    return instance
+    with _service_cache_lock:
+        cached = _service_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        try:
+            instance = builder(project_id, location)
+        except HTTPException:
+            raise
+        except Exception:
+            logger.error("Failed to initialize %s", service_label, exc_info=True)
+            raise HTTPException(
+                status_code=500,
+                detail=f"Internal server error initializing {service_label}",
+            )
+        _service_cache[cache_key] = instance
+        return instance
 
 
 def get_conversational_search_service() -> ConversationalSearchService:
@@ -159,6 +192,106 @@ def _validate_task_id(task_id: str) -> str:
     if parsed.version != 4 or str(parsed) != task_id.lower():
         raise HTTPException(status_code=400, detail="Invalid task_id format")
     return str(parsed)
+
+
+def _sanitize_enrichment_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Scrub raw downstream SDK str(e) strings from enrichment response dicts."""
+    sanitized = dict(result)
+    if "error" in sanitized and sanitized["error"] is not None:
+        if sanitized["error"] not in _SAFE_ENRICHMENT_ERRORS:
+            logger.warning("Sanitizing downstream enrichment error: %s", sanitized["error"])
+            sanitized["error"] = "Error generating enriched content"
+
+    enriched_fields = sanitized.get("enriched_fields")
+    if isinstance(enriched_fields, dict) and enriched_fields.get("error") is not None:
+        clean_fields = dict(enriched_fields)
+        if clean_fields["error"] not in _SAFE_ENRICHMENT_ERRORS:
+            logger.warning(
+                "Sanitizing downstream enrichment field error: %s",
+                clean_fields["error"],
+            )
+            clean_fields["error"] = "Error generating enriched content"
+        sanitized["enriched_fields"] = clean_fields
+    return sanitized
+
+
+def _sanitize_sql_genai_error(
+    error_msg: Optional[str],
+    fallback: str,
+) -> Optional[str]:
+    """Allowlist known model-level SQL feedback and scrub all SDK exception strings."""
+    if error_msg is None:
+        return None
+    if not isinstance(error_msg, str):
+        return fallback
+    unwrapped = error_msg.removeprefix("SQLFixer component failed: ").strip()
+    if not unwrapped.startswith(_SAFE_SQL_GENAI_ERROR_PREFIXES):
+        return fallback
+    return re.sub(
+        r"\b[a-zA-Z][a-zA-Z0-9+.-]*://\S+",
+        "[redacted-url]",
+        error_msg,
+    )
+
+
+def _sanitize_bq_validation_message(raw: str) -> str:
+    """Strip REST transport prefixes and URLs from BigQuery BadRequest messages."""
+    cleaned = raw.strip()
+    cleaned = re.sub(
+        r"^(?:\d{3}\s+)?(?:GET|POST|PUT|DELETE|PATCH)\s+https?://\S+?:\s*",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"https?://\S+", "[redacted-url]", cleaned)
+    cleaned = re.sub(
+        r"\b[a-zA-Z][a-zA-Z0-9+.-]*://\S+",
+        "[redacted-url]",
+        cleaned,
+    )
+    return cleaned.strip() or "SQL validation failed."
+
+
+def _sanitize_sql_validation_result(
+    validation_result: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Sanitize SQLValidator dry-run results, raising 500 on unexpected non-BadRequest errors."""
+    if not isinstance(validation_result, dict):
+        raise HTTPException(
+            status_code=500,
+            detail="Internal server error while validating SQL",
+        )
+
+    msg = validation_result.get("message")
+    details = validation_result.get("details")
+    if (
+        isinstance(msg, str)
+        and msg.startswith("An unexpected error occurred during SQL validation:")
+    ) or (isinstance(details, dict) and "error_type" in details):
+        logger.error(
+            "Unexpected downstream error during SQL validation: %s",
+            validation_result.get("error_message"),
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Internal server error while validating SQL",
+        )
+
+    sanitized = dict(validation_result)
+    if isinstance(sanitized.get("error_message"), str) and sanitized["error_message"]:
+        sanitized["error_message"] = _sanitize_bq_validation_message(
+            sanitized["error_message"]
+        )
+    if isinstance(sanitized.get("error"), str) and sanitized["error"]:
+        sanitized["error"] = _sanitize_bq_validation_message(sanitized["error"])
+    if isinstance(details, dict):
+        clean_details = dict(details)
+        if isinstance(clean_details.get("raw_error"), str) and clean_details["raw_error"]:
+            clean_details["raw_error"] = _sanitize_bq_validation_message(
+                clean_details["raw_error"]
+            )
+        sanitized["details"] = clean_details
+    return sanitized
 
 
 # Define request models
@@ -562,6 +695,8 @@ async def enrichment(
         if "error" in result:
             logger.warning(f"Enrichment error: {result['error']}")
 
+        if isinstance(result, dict):
+            result = _sanitize_enrichment_result(result)
         return result
 
     except HTTPException:
@@ -598,13 +733,30 @@ async def marketing(
             max_length=request.max_length,
         )
 
+        if isinstance(result, dict):
+            content_val = result.get("content")
+            if isinstance(content_val, str) and content_val.startswith(
+                "Error generating marketing content:"
+            ):
+                logger.error(
+                    "Downstream marketing content generation failed: %s", content_val
+                )
+                raise HTTPException(
+                    status_code=500,
+                    detail="Internal server error while generating marketing content",
+                )
+            if result.get("error"):
+                logger.error("Downstream marketing error: %s", result["error"])
+                raise HTTPException(
+                    status_code=500,
+                    detail="Internal server error while generating marketing content",
+                )
+
         logger.info(f"Marketing content generated for product: {request.product_id}")
         if result.get("content"):
             logger.info(
                 f"Generated content (first 100 chars): {result['content'][:100]}..."
             )
-        if "error" in result:
-            logger.warning(f"Marketing content error: {result['error']}")
 
         return result
 
@@ -648,10 +800,15 @@ async def generate_enhanced_image(
         logger.info(
             f"Enhanced image generation completed for product: {request.product_id}"
         )
-        if "generated_image_base64" in result:
+        if isinstance(result, dict) and "generated_image_base64" in result:
             logger.info("Generated image successfully (base64 data).")
-        elif "error" in result:
+        elif isinstance(result, dict) and result.get("error") is not None:
             logger.warning(f"Image generation error: {result['error']}")
+            if result["error"] not in _SAFE_IMAGE_ERRORS:
+                result = {
+                    **result,
+                    "error": "Error generating enhanced image",
+                }
         else:
             logger.warning("Image generation result format unexpected.")
 
@@ -824,7 +981,11 @@ async def simple_sql_fix(
 
         if error_msg:
             logger.error(f"Simple SQL fix attempt failed: {error_msg}")
-            return {"suggested_fixed_sql": None, "error": error_msg}
+            sanitized_err = _sanitize_sql_genai_error(
+                error_msg,
+                "Failed to generate SQL fix due to an internal AI service error.",
+            )
+            return {"suggested_fixed_sql": None, "error": sanitized_err}
 
         return {"suggested_fixed_sql": fixed_sql, "error": None}
 
@@ -857,7 +1018,7 @@ async def validate_sql(
             request.sql_script,
             request.timeout_seconds,
         )
-        return validation_result
+        return _sanitize_sql_validation_result(validation_result)
 
     except HTTPException:
         raise
@@ -896,11 +1057,16 @@ async def fix_sql(
         ):
             diff_text = fix_result_dict["analysis"].get("diff_text")
 
+        sanitized_err = _sanitize_sql_genai_error(
+            fix_result_dict.get("error"),
+            "Failed to generate SQL fix due to an internal AI service error.",
+        )
+
         return SQLFixResponse(
             success=fix_result_dict.get("success", False),
             suggested_sql=fix_result_dict.get("suggested_sql"),
             diff=diff_text,
-            error=fix_result_dict.get("error"),
+            error=sanitized_err,
         )
 
     except HTTPException:
@@ -946,6 +1112,14 @@ async def analyze_sql_diff(
         analysis = sql_fix_service.diff_analyzer.analyze_sql_differences(
             original_sql, fixed_sql
         )
+        if isinstance(analysis, dict) and analysis.get("error") is not None:
+            analysis = {
+                **analysis,
+                "error": _sanitize_sql_genai_error(
+                    analysis["error"],
+                    "Failed to analyze SQL differences due to an internal AI service error.",
+                ),
+            }
         return analysis
 
     except HTTPException:
