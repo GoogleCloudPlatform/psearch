@@ -237,3 +237,60 @@ Expected: All Python, Node/UI, HCL/Terraform, and Go suites PASS with `0 warning
 git add src/application/ui/src/ src/psearch/gen_ai/tests/test_ui_auth_headers.py
 git commit -m "feat(ui): propagate auth headers across GenAI and Search API clients"
 ```
+
+---
+
+### Task 5: Per-Principal Rate Limiting & Concurrent `/generate-sql` Background-Task Ceiling (`43dda815-be8b-4cb3-94df-d9e9b7a897aa`)
+
+**Files:**
+- Create: `src/psearch/gen_ai/rate_limit.py`
+- Modify: `src/psearch/gen_ai/tasks/task_manager.py`
+- Modify: `src/psearch/gen_ai/main.py`
+- Modify: `src/iac/modules/gen_ai/variables.tf`
+- Modify: `src/iac/modules/gen_ai/main.tf`
+- Modify: `src/iac/variables.tf`
+- Modify: `src/iac/main.tf`
+- Modify: `src/psearch/ingestion_source/tests/test_iac_security.py`
+- Create: `src/psearch/gen_ai/tests/test_rate_limit_and_concurrency.py`
+
+**Interfaces:**
+- Consumes: `AuthPrincipal`, `require_auth` from `src/psearch/gen_ai/auth.py`
+- Produces:
+  - `src/psearch/gen_ai/rate_limit.py`:
+    - `SlidingWindowRateLimiter` (thread-safe sliding-window per `(scope, principal_key)` with bounded `MAX_TRACKED_KEYS = 10_000` eviction; returns `HTTPException(429, headers={"Retry-After": ...})` when exceeded)
+    - `BackgroundTaskConcurrencyLimiter` (thread-safe active-slot limiter reading `GEN_AI_MAX_CONCURRENT_SQL_TASKS` default `3`; `acquire_or_reject()` raises `HTTPException(429, headers={"Retry-After": "5"})` when at ceiling; `release()` / `run_guarded(...)` guarantees `finally` release)
+    - FastAPI dependencies: `enforce_paid_inference_rate_limit`, `enforce_sql_task_rate_limit`, `enforce_status_poll_rate_limit`, `reset_limiters()`
+  - Thread-safe, bounded (`MAX_STORED_TASKS = 1000`) `task_manager.py`
+  - Terraform variables & Cloud Run env vars: `GEN_AI_RATE_LIMIT_PER_MINUTE` (`60`), `GEN_AI_SQL_TASK_RATE_LIMIT_PER_MINUTE` (`10`), `GEN_AI_MAX_CONCURRENT_SQL_TASKS` (`3`)
+
+- [ ] **Step 1: Write failing rate-limit, concurrency-cap, and 25-request PoC regression tests**
+
+Create `src/psearch/gen_ai/tests/test_rate_limit_and_concurrency.py` (and extend `test_iac_security.py`) testing:
+- `test_poc_25_anonymous_and_authenticated_burst_generate_sql_blocks_wallet_drain`:
+  - 25 anonymous `POST /generate-sql` requests → 25x `401`/`403`, `0` background tasks queued, `0` Gemini calls, `0` BigQuery jobs.
+  - With valid auth, `GEN_AI_MAX_CONCURRENT_SQL_TASKS=3` and `GEN_AI_SQL_TASK_RATE_LIMIT_PER_MINUTE=100`, firing 25 concurrent `POST /generate-sql` requests while 3 background pipelines are held open on a `threading.Event` accepts exactly `3` (`200`) and rejects `22` (`429` + `Retry-After`), then once the event releases all 3 slots are freed so subsequent requests succeed (`200`).
+- `test_per_principal_rate_limits_isolate_principals_and_spare_status_polling`:
+  - Exceeding `GEN_AI_RATE_LIMIT_PER_MINUTE=3` on `/conversational-search` returns `429` + `Retry-After` for `alice@example.com` while `bob@example.com` still gets `200`, and `GET /sql/task-status/{task_id}` continues succeeding (`200`/`404`) under `GEN_AI_STATUS_RATE_LIMIT_PER_MINUTE`.
+- `test_generate_sql_releases_concurrency_slot_if_pipeline_or_setup_raises`: if `execute_pipeline` raises an exception inside the background task (or `SchemaLoader` raises before scheduling), the concurrency slot is still released in `finally`.
+- `test_task_manager_is_thread_safe_and_evicts_oldest_completed_tasks_at_cap`: inserting > `MAX_STORED_TASKS` completed tasks evicts oldest terminal tasks while preserving active `"received"` / `"processing"` tasks.
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `PYTHONPATH=src uv run --with pytest --with httpx --with python-hcl2 --with fastapi --with pydantic --with google-auth --with requests --with google-cloud-storage --with google-cloud-bigquery --with google-genai --with pillow pytest -W default -q src/psearch/gen_ai/tests/test_rate_limit_and_concurrency.py src/psearch/ingestion_source/tests/test_iac_security.py`
+Expected: FAIL (`ModuleNotFoundError: No module named 'psearch.gen_ai.rate_limit'`)
+
+- [ ] **Step 3: Implement `rate_limit.py`, bounded `task_manager.py`, `main.py` wiring, and `gen_ai` Terraform variables**
+
+Implement `src/psearch/gen_ai/rate_limit.py`, update `task_manager.py` and `src/psearch/gen_ai/main.py` (`reset_limiters()` on fresh `create_app()` or clean module helper), and expose/wire the 3 rate-limit/concurrency env vars in `modules/gen_ai` and root `src/iac/`.
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `PYTHONPATH=src uv run --with pytest --with httpx --with python-hcl2 --with fastapi --with pydantic --with google-auth --with requests --with google-cloud-storage --with google-cloud-bigquery --with google-genai --with pillow pytest -W default -q src/psearch/gen_ai/tests/ src/psearch/gen_ai/services/sql/common/test_input_validation.py src/psearch/ingestion_source/tests/`
+Expected: PASS (`0 warnings`)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/psearch/gen_ai/ src/iac/ src/psearch/ingestion_source/tests/test_iac_security.py docs/superpowers/
+git commit -m "fix(gen_ai,iac): add per-principal rate limits and /generate-sql concurrency cap"
+```
