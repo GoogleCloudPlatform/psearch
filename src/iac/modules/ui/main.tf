@@ -78,6 +78,7 @@ locals {
 resource "google_cloud_run_v2_service" "ui_service" {
   name     = local.service_name
   location = var.region
+  ingress  = var.ingress
 
   template {
     containers {
@@ -130,18 +131,13 @@ resource "google_cloud_run_v2_service" "ui_service" {
   deletion_protection = false
 }
 
-# Make the service public
-data "google_iam_policy" "noauth" {
-  binding {
-    role = "roles/run.invoker"
-    members = [
-      "allUsers",
-    ]
-  }
-}
+# Grant Cloud Run invoker role only to explicitly configured principals
+resource "google_cloud_run_v2_service_iam_member" "invokers" {
+  for_each = toset(var.invoker_members)
 
-resource "google_cloud_run_v2_service_iam_policy" "noauth" {
-  location    = google_cloud_run_v2_service.ui_service.location
-  name        = google_cloud_run_v2_service.ui_service.name
-  policy_data = data.google_iam_policy.noauth.policy_data
+  project  = var.project_id
+  location = google_cloud_run_v2_service.ui_service.location
+  name     = google_cloud_run_v2_service.ui_service.name
+  role     = "roles/run.invoker"
+  member   = each.value
 }

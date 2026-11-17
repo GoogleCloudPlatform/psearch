@@ -16,6 +16,7 @@
 
 import axios from 'axios';
 import config from '../config';
+import { getServingAuthHeaders } from './apiAuth';
 
 const API_URL = config.apiUrl;
 const SESSION_STORAGE_KEY = 'psearch_session_id';
@@ -54,12 +55,20 @@ export function resetSessionId() {
 export async function recordSessionEvent(productId, eventType = 'click', tenantId = 'default') {
     const sid = getSessionId();
     try {
-        const response = await axios.post(`${API_URL}/api/session/events`, {
-            session_id: sid,
-            product_id: productId,
-            event_type: eventType,
-            tenant_id: tenantId || 'default',
-        });
+        const response = await axios.post(
+            `${API_URL}/api/session/events`,
+            {
+                session_id: sid,
+                product_id: productId,
+                event_type: eventType,
+                tenant_id: tenantId || 'default',
+            },
+            {
+                headers: {
+                    ...getServingAuthHeaders(),
+                },
+            }
+        );
         return response.data;
     } catch (err) {
         console.error('Failed to record session event:', err);
@@ -74,6 +83,9 @@ export async function fetchSessionEvents(tenantId = 'default') {
             params: {
                 session_id: sid,
                 tenant_id: tenantId || 'default',
+            },
+            headers: {
+                ...getServingAuthHeaders(),
             },
         });
         return response.data;
@@ -116,12 +128,20 @@ export async function seedPersonaEvents(personaId, tenantId = 'default') {
 
     for (const pid of persona.productIds) {
         try {
-            await axios.post(`${API_URL}/api/session/events`, {
-                session_id: newSessionId,
-                product_id: pid,
-                event_type: 'click',
-                tenant_id: tenantId || 'default',
-            });
+            await axios.post(
+                `${API_URL}/api/session/events`,
+                {
+                    session_id: newSessionId,
+                    product_id: pid,
+                    event_type: 'click',
+                    tenant_id: tenantId || 'default',
+                },
+                {
+                    headers: {
+                        ...getServingAuthHeaders(),
+                    },
+                }
+            );
         } catch (e) {
             console.error(`Failed to seed event for ${pid}:`, e);
         }

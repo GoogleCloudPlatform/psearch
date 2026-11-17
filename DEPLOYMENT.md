@@ -30,7 +30,12 @@ Real project IDs, service-account emails and service URLs are intentionally repl
 | `SPANNER_DISABLE_BUILTIN_METRICS` | `true` | silences client-metrics export (runtime SA has no monitoring role) |
 | `GEMINI_TEXT_MODEL` / `GEMINI_PRO_MODEL` | defaults `gemini-3.8-flash` / `gemini-4-pro` | reported by `/api/info` as `text_model` / `pro_model` |
 | `INTENT_LLM_FALLBACK` | unset (`false`) | parser-only query understanding |
-| `ADMIN_TOKEN` | unset | admin writes (rules, synonyms, embedding-version switch) return 403 |
+| `REQUIRE_API_AUTH` | `true` (default in `production` when `USE_MEMORY_STORE=false`) | enforces fail-closed authentication on all non-health API routes |
+| `SERVING_AUTH_AUDIENCE` | `<SERVICE_URL>` | expected OIDC audience for `Authorization: Bearer <id_token>` |
+| `SERVING_ALLOWED_PRINCIPALS` / `SERVING_ALLOWED_DOMAINS` | explicit caller emails / Workspace domains | verified OIDC email allowlist or Workspace `hd` == email domain |
+| `API_TOKEN` | optional secret | read/query API key (`X-API-Key`); never grants admin writes |
+| `ADMIN_TOKEN` | unset | admin writes (rules, synonyms, embedding-version switch via `X-Admin-Token`) return 403 when unset |
+| `ALLOWED_ORIGINS` | explicit UI origin(s) or unset | comma-separated non-wildcard origins for credentialed CORS (`*` is ignored) |
 | `BOOST_WEIGHT`, `SESSION_BOOST_WEIGHT`, `LTR_MODEL_JSON` | defaults (`0.002`, `0.003`, baseline model) | |
 
 Service account: `<RUNTIME_SA>`. Full variable reference: [DESIGN.md §16](DESIGN.md#16-configuration-environment).

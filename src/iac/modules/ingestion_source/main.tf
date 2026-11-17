@@ -77,6 +77,7 @@ locals {
 resource "google_cloud_run_v2_service" "ingestion_source_service" {
   name     = local.service_name
   location = var.region
+  ingress  = var.ingress
 
   template {
     containers {

@@ -59,13 +59,80 @@ variable "timeout_seconds" {
 }
 
 variable "invoker_members" {
-  description = <<-EOT
-    IAM principals granted roles/run.invoker on the Gen AI service.
-    Defaults to ["allUsers"] for backwards compatibility, which leaves
-    /generate-sql anonymously reachable. Override with the UI service account
-    (e.g. ["serviceAccount:ui-sa@PROJECT.iam.gserviceaccount.com"]) in any
-    environment where billable Gemini/BigQuery calls must not be public.
-  EOT
+  description = "Explicit IAM principals granted roles/run.invoker on gen-ai-service (defaults to none)"
   type        = list(string)
-  default     = ["allUsers"]
+  default     = []
+
+  validation {
+    condition     = !contains(var.invoker_members, "allUsers") && !contains(var.invoker_members, "allAuthenticatedUsers")
+    error_message = "Public principals (allUsers, allAuthenticatedUsers) are not permitted on gen-ai-service."
+  }
+}
+
+variable "ingress" {
+  description = "Cloud Run ingress traffic setting for gen-ai-service"
+  type        = string
+  default     = "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"
+
+  validation {
+    condition     = contains(["INGRESS_TRAFFIC_INTERNAL_ONLY", "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER", "INGRESS_TRAFFIC_ALL"], var.ingress)
+    error_message = "ingress must be one of INGRESS_TRAFFIC_INTERNAL_ONLY, INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER, or INGRESS_TRAFFIC_ALL."
+  }
+}
+
+variable "gen_ai_auth_audience" {
+  description = "Expected OIDC token audience for gen-ai-service Bearer authentication"
+  type        = string
+  default     = ""
+}
+
+variable "gen_ai_allowed_principals" {
+  description = "Comma-separated allowlist of authenticated email principals allowed to call gen-ai-service"
+  type        = string
+  default     = ""
+}
+
+variable "gen_ai_allowed_domains" {
+  description = "Comma-separated allowlist of Google Workspace domains allowed to call gen-ai-service"
+  type        = string
+  default     = ""
+}
+
+variable "allowed_origins" {
+  description = "Comma-separated CORS allowed origins for gen-ai-service"
+  type        = string
+  default     = ""
+}
+
+variable "rate_limit_per_minute" {
+  description = "Per-principal sliding-window rate limit per minute for paid Gen AI / BigQuery endpoints"
+  type        = number
+  default     = 60
+
+  validation {
+    condition     = var.rate_limit_per_minute > 0
+    error_message = "rate_limit_per_minute must be greater than 0."
+  }
+}
+
+variable "sql_task_rate_limit_per_minute" {
+  description = "Per-principal sliding-window rate limit per minute for POST /generate-sql"
+  type        = number
+  default     = 10
+
+  validation {
+    condition     = var.sql_task_rate_limit_per_minute > 0
+    error_message = "sql_task_rate_limit_per_minute must be greater than 0."
+  }
+}
+
+variable "max_concurrent_sql_tasks" {
+  description = "Maximum concurrent background SQL generation tasks per Cloud Run instance"
+  type        = number
+  default     = 3
+
+  validation {
+    condition     = var.max_concurrent_sql_tasks > 0
+    error_message = "max_concurrent_sql_tasks must be greater than 0."
+  }
 }

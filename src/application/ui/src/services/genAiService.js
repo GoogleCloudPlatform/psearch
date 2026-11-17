@@ -18,6 +18,7 @@ import axios from 'axios';
 import { GEN_AI_URL } from '../config';
 import productSchema from '../products.json'; // Updated import path for moved file
 import config from '../config'; // Import config to get projectId
+import { getGenAiAuthHeaders } from './apiAuth';
 
 /**
  * Service for handling interactions with the Gen AI API
@@ -35,7 +36,8 @@ export const getConversationalSearch = async (query, conversationHistory, produc
             timeout: 25000, // 25 second timeout
             headers: {
                 'Content-Type': 'application/json',
-                'Accept': 'application/json'
+                'Accept': 'application/json',
+                ...getGenAiAuthHeaders()
             }
         });
 
@@ -77,7 +79,8 @@ export const getProductEnrichment = async (productId, productData, fieldsToEnric
             timeout: 25000, // 25 second timeout - shorter than the UI timeout
             headers: {
                 'Content-Type': 'application/json',
-                'Accept': 'application/json'
+                'Accept': 'application/json',
+                ...getGenAiAuthHeaders()
             }
         });
 
@@ -150,7 +153,8 @@ export const generateMarketingContent = async (
             timeout: 25000, // 25 second timeout
             headers: {
                 'Content-Type': 'application/json',
-                'Accept': 'application/json'
+                'Accept': 'application/json',
+                ...getGenAiAuthHeaders()
             }
         });
 
@@ -188,7 +192,8 @@ export const generateEnhancedImage = async (payload) => {
             timeout: 40000, // 40 second timeout (image generation takes longer)
             headers: {
                 'Content-Type': 'application/json',
-                'Accept': 'application/json'
+                'Accept': 'application/json',
+                ...getGenAiAuthHeaders()
             }
         });
 
@@ -276,7 +281,8 @@ export const generateTransformationSql = async (sourceTableId, destinationTableI
       timeout: 300000, // 300 second (5 minute) timeout for complex SQL generation
       headers: {
         'Content-Type': 'application/json',
-        'Accept': 'application/json'
+        'Accept': 'application/json',
+        ...getGenAiAuthHeaders()
       }
     });
 
@@ -334,7 +340,8 @@ export const refineTransformationSql = async (sqlScript, errorMessage) => {
       timeout: 180000, // 180 second (3 minute) timeout for SQL refinement
       headers: {
         'Content-Type': 'application/json',
-        'Accept': 'application/json'
+        'Accept': 'application/json',
+        ...getGenAiAuthHeaders()
       }
     });
 
@@ -359,10 +366,11 @@ export const refineTransformationSql = async (sqlScript, errorMessage) => {
 export const getSqlTaskStatus = async (taskId) => {
   console.log(`Fetching status for SQL task ID: ${taskId}`);
   try {
-    const response = await axios.get(`${GEN_AI_URL}/sql/task-status/${taskId}`, {
+    const response = await axios.get(`${GEN_AI_URL}/sql/task-status/${encodeURIComponent(taskId)}`, {
       timeout: 10000, // 10 second timeout for status checks
       headers: {
-        'Accept': 'application/json'
+        'Accept': 'application/json',
+        ...getGenAiAuthHeaders()
       }
     });
     if (!response.data) {
@@ -409,7 +417,8 @@ export const generateSqlFix = async (originalSql, currentSql, errorMessage, atte
       timeout: 180000,  // 180 second (3 minute) timeout for SQL fixes
       headers: {
         'Content-Type': 'application/json',
-        'Accept': 'application/json'
+        'Accept': 'application/json',
+        ...getGenAiAuthHeaders()
       }
     });
     
@@ -463,7 +472,8 @@ export const validateSqlFix = async (sqlToApply, attemptNumber = 1) => {
       timeout: 35000,  // 35 second timeout
       headers: {
         'Content-Type': 'application/json',
-        'Accept': 'application/json'
+        'Accept': 'application/json',
+        ...getGenAiAuthHeaders()
       }
     });
     
@@ -516,7 +526,8 @@ export const analyzeSqlDifferences = async (originalSql, fixedSql) => {
       timeout: 30000,  // 30 second timeout
       headers: {
         'Content-Type': 'application/json',
-        'Accept': 'application/json'
+        'Accept': 'application/json',
+        ...getGenAiAuthHeaders()
       }
     });
     
@@ -564,7 +575,8 @@ export const getSimpleSqlFix = async (sqlScript, errorMessage) => {
       timeout: 180000, // 3 minute timeout
       headers: {
         'Content-Type': 'application/json',
-        'Accept': 'application/json'
+        'Accept': 'application/json',
+        ...getGenAiAuthHeaders()
       }
     });
     if (!response.data) {

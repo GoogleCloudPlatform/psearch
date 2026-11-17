@@ -16,6 +16,7 @@
 
 import axios from 'axios';
 import config from '../config';
+import { getServingAuthHeaders } from './apiAuth';
 
 const API_URL = config.apiUrl;
 
@@ -28,19 +29,28 @@ function getAdminToken(explicitToken) {
     return explicitToken.trim();
   }
   try {
-    return (sessionStorage.getItem('psearch_admin_token') || '').trim();
+    if (
+      typeof sessionStorage !== 'undefined' &&
+      sessionStorage &&
+      typeof sessionStorage.getItem === 'function'
+    ) {
+      return (sessionStorage.getItem('psearch_admin_token') || '').trim();
+    }
   } catch {
     return '';
   }
+  return '';
 }
 
-function getAuthHeaders(token) {
+function authHeaders(token, { fallbackToServing = false } = {}) {
   const adminToken = getAdminToken(token);
-  const headers = {};
   if (adminToken) {
-    headers['X-Admin-Token'] = adminToken;
+    return { 'X-Admin-Token': adminToken };
   }
-  return headers;
+  if (fallbackToServing) {
+    return { ...getServingAuthHeaders() };
+  }
+  return {};
 }
 
 /**
@@ -164,6 +174,7 @@ export const ruleService = {
   async getRules(tenantId = 'default') {
     const res = await axios.get(`${API_URL}/api/rules`, {
       params: { tenant_id: tenantId || 'default' },
+      headers: authHeaders(undefined, { fallbackToServing: true }),
     });
     const rulesList = (res.data && res.data.rules) || [];
     return rulesList.map(fromApiRule);
@@ -180,7 +191,7 @@ export const ruleService = {
     const tenantId = apiPayload.tenant_id || 'default';
     const res = await axios.post(`${API_URL}/api/rules`, apiPayload, {
       params: { tenant_id: tenantId },
-      headers: getAuthHeaders(token),
+      headers: authHeaders(token),
     });
     return fromApiRule(res.data);
   },
@@ -197,7 +208,7 @@ export const ruleService = {
     const tenantId = apiPayload.tenant_id || 'default';
     const res = await axios.put(`${API_URL}/api/rules/${encodeURIComponent(ruleId)}`, apiPayload, {
       params: { tenant_id: tenantId },
-      headers: getAuthHeaders(token),
+      headers: authHeaders(token),
     });
     return fromApiRule(res.data);
   },
@@ -219,7 +230,7 @@ export const ruleService = {
     }
     await axios.delete(`${API_URL}/api/rules/${encodeURIComponent(ruleId)}`, {
       params: { tenant_id: tid || 'default' },
-      headers: getAuthHeaders(tkn),
+      headers: authHeaders(tkn),
     });
   },
 

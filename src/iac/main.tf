@@ -117,15 +117,23 @@ module "ingestion_spanner" {
 }
 
 module "search_api" {
-  source                = "./modules/search_api"
-  project_id            = var.project_id
-  region                = var.region
-  service_account_email = module.iam.ingestion_service_account_email
-  spanner_instance_id   = module.spanner.instance_id
-  spanner_database_id   = module.spanner.database_id
+  source                     = "./modules/search_api"
+  project_id                 = var.project_id
+  region                     = var.region
+  service_account_email      = module.iam.search_api_service_account_email
+  spanner_instance_id        = module.spanner.instance_id
+  spanner_database_id        = module.spanner.database_id
+  invoker_members            = var.search_api_invoker_members
+  ingress                    = var.search_api_ingress
+  require_api_auth           = var.search_api_require_auth
+  serving_auth_audience      = var.serving_auth_audience
+  serving_allowed_principals = var.serving_allowed_principals
+  serving_allowed_domains    = var.serving_allowed_domains
+  allowed_origins            = var.search_api_allowed_origins
 
   depends_on = [
-    module.spanner
+    module.spanner,
+    google_spanner_database_iam_member.search_api_spanner_user
   ]
 }
 
@@ -133,7 +141,9 @@ module "ui" {
   source                = "./modules/ui"
   project_id            = var.project_id
   region                = var.region
-  service_account_email = module.iam.ingestion_service_account_email # TODO: Create a new Service Account for this service
+  service_account_email = module.iam.ui_service_account_email
+  invoker_members       = var.ui_invoker_members
+  ingress               = var.ui_ingress
   search_api_url        = module.search_api.service_url
   gen_ai_url            = module.gen_ai.service_url
   ingestion_source_url  = module.ingestion_source.service_url
@@ -146,10 +156,19 @@ module "ui" {
 }
 
 module "gen_ai" {
-  source                = "./modules/gen_ai"
-  project_id            = var.project_id
-  region                = var.region
-  service_account_email = module.iam.ingestion_service_account_email # TODO: Create a new Service Account for this service
+  source                         = "./modules/gen_ai"
+  project_id                     = var.project_id
+  region                         = var.region
+  service_account_email          = module.iam.gen_ai_service_account_email
+  invoker_members                = var.gen_ai_invoker_members
+  ingress                        = var.gen_ai_ingress
+  gen_ai_auth_audience           = var.gen_ai_auth_audience
+  gen_ai_allowed_principals      = var.gen_ai_allowed_principals
+  gen_ai_allowed_domains         = var.gen_ai_allowed_domains
+  allowed_origins                = var.gen_ai_allowed_origins
+  rate_limit_per_minute          = var.gen_ai_rate_limit_per_minute
+  sql_task_rate_limit_per_minute = var.gen_ai_sql_task_rate_limit_per_minute
+  max_concurrent_sql_tasks       = var.gen_ai_max_concurrent_sql_tasks
 
   depends_on = [
     time_sleep.wait_for_iam
@@ -162,6 +181,7 @@ module "ingestion_source" {
   region                       = var.region
   service_account_email        = module.iam.ingestion_source_service_account_email
   invoker_members              = var.ingestion_source_invoker_members
+  ingress                      = var.ingestion_source_ingress
   ingestion_auth_audience      = var.ingestion_auth_audience
   ingestion_allowed_principals = var.ingestion_allowed_principals
   ingestion_allowed_domains    = var.ingestion_allowed_domains
@@ -181,5 +201,39 @@ resource "google_bigquery_dataset_iam_member" "ingestion_source_psearch_raw_edit
 
   depends_on = [
     module.ingestion_spanner
+  ]
+}
+
+resource "google_bigquery_dataset_iam_member" "gen_ai_psearch_raw_viewer" {
+  project    = var.project_id
+  dataset_id = "psearch_raw"
+  role       = "roles/bigquery.dataViewer"
+  member     = "serviceAccount:${module.iam.gen_ai_service_account_email}"
+
+  depends_on = [
+    module.ingestion_spanner
+  ]
+}
+
+resource "google_bigquery_dataset_iam_member" "gen_ai_psearch_viewer" {
+  project    = var.project_id
+  dataset_id = "psearch"
+  role       = "roles/bigquery.dataViewer"
+  member     = "serviceAccount:${module.iam.gen_ai_service_account_email}"
+
+  depends_on = [
+    module.ingestion_spanner
+  ]
+}
+
+resource "google_spanner_database_iam_member" "search_api_spanner_user" {
+  project  = var.project_id
+  instance = module.spanner.instance_id
+  database = module.spanner.database_id
+  role     = "roles/spanner.databaseUser"
+  member   = "serviceAccount:${module.iam.search_api_service_account_email}"
+
+  depends_on = [
+    module.spanner
   ]
 }

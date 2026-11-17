@@ -69,6 +69,17 @@ variable "invoker_members" {
   }
 }
 
+variable "ingress" {
+  description = "Cloud Run ingress traffic setting for ingestion-source-service"
+  type        = string
+  default     = "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"
+
+  validation {
+    condition     = contains(["INGRESS_TRAFFIC_INTERNAL_ONLY", "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER", "INGRESS_TRAFFIC_ALL"], var.ingress)
+    error_message = "ingress must be one of INGRESS_TRAFFIC_INTERNAL_ONLY, INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER, or INGRESS_TRAFFIC_ALL."
+  }
+}
+
 variable "ingestion_auth_audience" {
   description = "Expected OIDC token audience for ingestion-source-service Bearer authentication"
   type        = string

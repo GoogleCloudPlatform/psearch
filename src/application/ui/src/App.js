@@ -48,6 +48,7 @@ import ProductImage from './components/ProductImage'; // Import the optimized Pr
 import SearchInput from './components/SearchInput'; // Import the new isolated search component
 import SessionPanel from './components/SessionPanel';
 import { getSessionId, recordSessionEvent } from './services/sessionService';
+import { getServingAuthHeaders } from './services/apiAuth';
 import axios from 'axios';
 import config from './config';
 const API_URL = config.apiUrl;
@@ -655,7 +656,11 @@ function ProductSearch({
                 payload.sort_by = sortByToUse;
             }
 
-            const response = await axios.post(`${API_URL}/search`, payload);
+            const response = await axios.post(`${API_URL}/search`, payload, {
+                headers: {
+                    ...getServingAuthHeaders(),
+                },
+            });
 
             console.log("API Response:", JSON.stringify(response.data, null, 2));
 

@@ -29,32 +29,14 @@ resource "google_service_account" "embeddings_service_account" {
   project      = var.project_id
 }
 
-# Grant Roles to Service Account
+# Grant least-privilege runtime roles to Ingestion Service Account (Spanner / BQ Data Transfer)
 resource "google_project_iam_member" "grant_sa_function_roles" {
   for_each = toset([
-    # Existing roles
     "roles/bigquery.user",
-    "roles/storage.objectAdmin",
-    "roles/run.invoker",
-    "roles/cloudbuild.builds.builder",
-    "roles/cloudfunctions.developer",
-    "roles/iam.serviceAccountUser",
-    "roles/run.developer",
-    "roles/artifactregistry.reader",
-    "roles/serviceusage.serviceUsageConsumer",
-    "roles/logging.logWriter",
-    "roles/cloudbuild.serviceAgent",
-    "roles/datastore.user",
-
-    # Added Vector Search specific roles
-    "roles/aiplatform.user",
-    "roles/aiplatform.serviceAgent",
-    "roles/datastore.owner",
-
-    # Add Spanner roles
     "roles/spanner.databaseUser",
-    "roles/spanner.databaseReader",
-    "roles/spanner.databaseAdmin"
+    "roles/aiplatform.user",
+    "roles/logging.logWriter",
+    "roles/serviceusage.serviceUsageConsumer"
   ])
 
   role    = each.key
@@ -132,4 +114,63 @@ resource "google_project_iam_member" "grant_ingestion_source_sa_roles" {
   role    = each.key
   project = var.project_id
   member  = "serviceAccount:${google_service_account.ingestion_source_service_account.email}"
+}
+
+# Create a dedicated least-privilege service account for gen-ai-service
+resource "google_service_account" "gen_ai_service_account" {
+  account_id   = "gen-ai-sa"
+  display_name = "Gen AI Service Account"
+  description  = "Dedicated least-privilege service account for gen-ai-service"
+  project      = var.project_id
+}
+
+resource "google_project_iam_member" "grant_gen_ai_sa_roles" {
+  for_each = toset([
+    "roles/aiplatform.user",
+    "roles/bigquery.jobUser",
+    "roles/logging.logWriter",
+    "roles/serviceusage.serviceUsageConsumer"
+  ])
+
+  role    = each.key
+  project = var.project_id
+  member  = "serviceAccount:${google_service_account.gen_ai_service_account.email}"
+}
+
+# Create a dedicated least-privilege service account for product-search-api
+resource "google_service_account" "search_api_service_account" {
+  account_id   = "search-api-sa"
+  display_name = "Search API Service Account"
+  description  = "Dedicated least-privilege service account for product-search-api"
+  project      = var.project_id
+}
+
+resource "google_project_iam_member" "grant_search_api_sa_roles" {
+  for_each = toset([
+    "roles/aiplatform.user",
+    "roles/logging.logWriter",
+    "roles/serviceusage.serviceUsageConsumer"
+  ])
+
+  role    = each.key
+  project = var.project_id
+  member  = "serviceAccount:${google_service_account.search_api_service_account.email}"
+}
+
+# Create a dedicated least-privilege service account for psearch-ui
+resource "google_service_account" "ui_service_account" {
+  account_id   = "psearch-ui-sa"
+  display_name = "PSearch UI Service Account"
+  description  = "Dedicated least-privilege service account for psearch-ui"
+  project      = var.project_id
+}
+
+resource "google_project_iam_member" "grant_ui_sa_roles" {
+  for_each = toset([
+    "roles/logging.logWriter"
+  ])
+
+  role    = each.key
+  project = var.project_id
+  member  = "serviceAccount:${google_service_account.ui_service_account.email}"
 }

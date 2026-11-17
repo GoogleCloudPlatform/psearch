@@ -74,3 +74,167 @@ variable "ingestion_max_upload_size_bytes" {
   type        = number
   default     = 52428800
 }
+
+variable "ingestion_source_ingress" {
+  description = "Cloud Run ingress traffic setting for ingestion-source-service"
+  type        = string
+  default     = "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"
+
+  validation {
+    condition     = contains(["INGRESS_TRAFFIC_INTERNAL_ONLY", "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER", "INGRESS_TRAFFIC_ALL"], var.ingestion_source_ingress)
+    error_message = "ingestion_source_ingress must be one of INGRESS_TRAFFIC_INTERNAL_ONLY, INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER, or INGRESS_TRAFFIC_ALL."
+  }
+}
+
+variable "gen_ai_invoker_members" {
+  description = "Explicit IAM principals granted roles/run.invoker on gen-ai-service (defaults to none)"
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = !contains(var.gen_ai_invoker_members, "allUsers") && !contains(var.gen_ai_invoker_members, "allAuthenticatedUsers")
+    error_message = "Public principals (allUsers, allAuthenticatedUsers) are not permitted on gen-ai-service."
+  }
+}
+
+variable "gen_ai_ingress" {
+  description = "Cloud Run ingress traffic setting for gen-ai-service"
+  type        = string
+  default     = "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"
+
+  validation {
+    condition     = contains(["INGRESS_TRAFFIC_INTERNAL_ONLY", "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER", "INGRESS_TRAFFIC_ALL"], var.gen_ai_ingress)
+    error_message = "gen_ai_ingress must be one of INGRESS_TRAFFIC_INTERNAL_ONLY, INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER, or INGRESS_TRAFFIC_ALL."
+  }
+}
+
+variable "gen_ai_auth_audience" {
+  description = "Expected OIDC token audience for gen-ai-service Bearer authentication"
+  type        = string
+  default     = ""
+}
+
+variable "gen_ai_allowed_principals" {
+  description = "Comma-separated allowlist of authenticated email principals allowed to call gen-ai-service"
+  type        = string
+  default     = ""
+}
+
+variable "gen_ai_allowed_domains" {
+  description = "Comma-separated allowlist of Google Workspace domains allowed to call gen-ai-service"
+  type        = string
+  default     = ""
+}
+
+variable "gen_ai_allowed_origins" {
+  description = "Comma-separated CORS allowed origins for gen-ai-service"
+  type        = string
+  default     = ""
+}
+
+variable "gen_ai_rate_limit_per_minute" {
+  description = "Per-principal sliding-window rate limit per minute for paid Gen AI / BigQuery endpoints"
+  type        = number
+  default     = 60
+
+  validation {
+    condition     = var.gen_ai_rate_limit_per_minute > 0
+    error_message = "gen_ai_rate_limit_per_minute must be greater than 0."
+  }
+}
+
+variable "gen_ai_sql_task_rate_limit_per_minute" {
+  description = "Per-principal sliding-window rate limit per minute for POST /generate-sql"
+  type        = number
+  default     = 10
+
+  validation {
+    condition     = var.gen_ai_sql_task_rate_limit_per_minute > 0
+    error_message = "gen_ai_sql_task_rate_limit_per_minute must be greater than 0."
+  }
+}
+
+variable "gen_ai_max_concurrent_sql_tasks" {
+  description = "Maximum concurrent background SQL generation tasks per gen-ai-service instance"
+  type        = number
+  default     = 3
+
+  validation {
+    condition     = var.gen_ai_max_concurrent_sql_tasks > 0
+    error_message = "gen_ai_max_concurrent_sql_tasks must be greater than 0."
+  }
+}
+
+variable "search_api_invoker_members" {
+  description = "Explicit IAM principals granted roles/run.invoker on product-search-api (defaults to none)"
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = !contains(var.search_api_invoker_members, "allUsers") && !contains(var.search_api_invoker_members, "allAuthenticatedUsers")
+    error_message = "Public principals (allUsers, allAuthenticatedUsers) are not permitted on product-search-api."
+  }
+}
+
+variable "search_api_ingress" {
+  description = "Cloud Run ingress traffic setting for product-search-api"
+  type        = string
+  default     = "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"
+
+  validation {
+    condition     = contains(["INGRESS_TRAFFIC_INTERNAL_ONLY", "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER", "INGRESS_TRAFFIC_ALL"], var.search_api_ingress)
+    error_message = "search_api_ingress must be one of INGRESS_TRAFFIC_INTERNAL_ONLY, INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER, or INGRESS_TRAFFIC_ALL."
+  }
+}
+
+variable "search_api_require_auth" {
+  description = "Whether Bearer OIDC authentication is required on product-search-api endpoints"
+  type        = string
+  default     = "true"
+}
+
+variable "serving_auth_audience" {
+  description = "Expected OIDC token audience for product-search-api Bearer authentication"
+  type        = string
+  default     = ""
+}
+
+variable "serving_allowed_principals" {
+  description = "Comma-separated allowlist of authenticated email principals allowed to call product-search-api"
+  type        = string
+  default     = ""
+}
+
+variable "serving_allowed_domains" {
+  description = "Comma-separated allowlist of Google Workspace domains allowed to call product-search-api"
+  type        = string
+  default     = ""
+}
+
+variable "search_api_allowed_origins" {
+  description = "Comma-separated CORS allowed origins for product-search-api"
+  type        = string
+  default     = ""
+}
+
+variable "ui_invoker_members" {
+  description = "Explicit IAM principals granted roles/run.invoker on psearch-ui (defaults to none)"
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = !contains(var.ui_invoker_members, "allUsers") && !contains(var.ui_invoker_members, "allAuthenticatedUsers")
+    error_message = "Public principals (allUsers, allAuthenticatedUsers) are not permitted on psearch-ui."
+  }
+}
+
+variable "ui_ingress" {
+  description = "Cloud Run ingress traffic setting for psearch-ui"
+  type        = string
+  default     = "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"
+
+  validation {
+    condition     = contains(["INGRESS_TRAFFIC_INTERNAL_ONLY", "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER", "INGRESS_TRAFFIC_ALL"], var.ui_ingress)
+    error_message = "ui_ingress must be one of INGRESS_TRAFFIC_INTERNAL_ONLY, INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER, or INGRESS_TRAFFIC_ALL."
+  }
+}

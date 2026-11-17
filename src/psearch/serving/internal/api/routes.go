@@ -11,13 +11,19 @@ import (
 )
 
 func SetupRouter(router *gin.Engine, cfg *config.Config) {
-	router.Use(cors.New(cors.Config{
-		AllowOrigins:     []string{"*"},
-		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization"},
-		ExposeHeaders:    []string{"Content-Length"},
-		AllowCredentials: true,
-	}))
+	SetupRouterWithVerifier(router, cfg, DefaultTokenVerifier)
+}
+
+func SetupRouterWithVerifier(router *gin.Engine, cfg *config.Config, verifier TokenVerifier) {
+	if origins := config.SanitizeAllowedOrigins(cfg.AllowedOrigins); len(origins) > 0 {
+		router.Use(cors.New(cors.Config{
+			AllowOrigins:     origins,
+			AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+			AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization", "X-API-Key", "X-Admin-Token"},
+			ExposeHeaders:    []string{"Content-Length"},
+			AllowCredentials: true,
+		}))
+	}
 
 	router.Use(LoggerMiddleware())
 
@@ -29,22 +35,24 @@ func SetupRouter(router *gin.Engine, cfg *config.Config) {
 	router.GET("/health", controller.HealthCheck)
 	router.GET("/healthz", controller.HealthCheck)
 	router.GET("/api/health", controller.HealthCheck)
-	router.GET("/api/info", controller.Info)
-	router.GET("/api/config/embedding-version", controller.GetEmbeddingVersion)
-	router.POST("/api/config/embedding-version", controller.SetEmbeddingVersion)
-	router.GET("/api/synonyms", controller.ListSynonyms)
-	router.POST("/api/synonyms", controller.UpsertSynonym)
-	router.GET("/api/autocomplete", controller.Autocomplete)
-	router.POST("/api/session/events", controller.RecordSessionEvent)
-	router.GET("/api/session/events", controller.ListSessionEvents)
-	router.GET("/api/rules", controller.ListRules)
-	router.POST("/api/rules", controller.CreateRule)
-	router.PUT("/api/rules/:id", controller.UpdateRule)
-	router.DELETE("/api/rules/:id", controller.DeleteRule)
-	router.GET("/search", controller.Search)
-	router.POST("/search", controller.Search)
-	router.GET("/api/search", controller.Search)
-	router.POST("/api/search", controller.Search)
+
+	apiGroup := router.Group("", AuthorizeAPI(cfg, verifier))
+	apiGroup.GET("/api/info", controller.Info)
+	apiGroup.GET("/api/config/embedding-version", controller.GetEmbeddingVersion)
+	apiGroup.POST("/api/config/embedding-version", controller.SetEmbeddingVersion)
+	apiGroup.GET("/api/synonyms", controller.ListSynonyms)
+	apiGroup.POST("/api/synonyms", controller.UpsertSynonym)
+	apiGroup.GET("/api/autocomplete", controller.Autocomplete)
+	apiGroup.POST("/api/session/events", controller.RecordSessionEvent)
+	apiGroup.GET("/api/session/events", controller.ListSessionEvents)
+	apiGroup.GET("/api/rules", controller.ListRules)
+	apiGroup.POST("/api/rules", controller.CreateRule)
+	apiGroup.PUT("/api/rules/:id", controller.UpdateRule)
+	apiGroup.DELETE("/api/rules/:id", controller.DeleteRule)
+	apiGroup.GET("/search", controller.Search)
+	apiGroup.POST("/search", controller.Search)
+	apiGroup.GET("/api/search", controller.Search)
+	apiGroup.POST("/api/search", controller.Search)
 
 	if cfg.StaticDir != "" {
 		if info, err := os.Stat(cfg.StaticDir); err == nil && info.IsDir() {
@@ -228,6 +236,36 @@ const defaultStorefrontHTML = `<!DOCTYPE html>
     </div>
   </main>
   <script>
+    function getStorefrontAuthHeaders() {
+      const headers = {};
+      const normBearer = (raw) =>
+        typeof raw === 'string' ? raw.trim().replace(/^bearer(?:\s+|$)/i, '').trim() : '';
+      const normKey = (raw) => (typeof raw === 'string' ? raw.trim() : '');
+      const readStore = (getStore, key) => {
+        try {
+          const store = getStore();
+          return store && typeof store.getItem === 'function' ? store.getItem(key) : '';
+        } catch (e) {
+          return '';
+        }
+      };
+      const sess = () => (typeof sessionStorage !== 'undefined' ? sessionStorage : null);
+      const loc = () => (typeof localStorage !== 'undefined' ? localStorage : null);
+      const bearer =
+        normBearer(readStore(sess, 'psearchAuthToken')) ||
+        normBearer(readStore(loc, 'psearchAuthToken'));
+      const apiKey =
+        normKey(readStore(sess, 'psearch_api_token')) ||
+        normKey(readStore(sess, 'psearchApiToken')) ||
+        normKey(readStore(loc, 'psearch_api_token')) ||
+        normKey(readStore(loc, 'psearchApiToken'));
+      if (bearer) {
+        headers['Authorization'] = 'Bearer ' + bearer;
+      } else if (apiKey) {
+        headers['X-API-Key'] = apiKey;
+      }
+      return headers;
+    }
     async function runSearch(opts) {
       opts = opts || {};
       const q = document.getElementById('q').value;
@@ -290,7 +328,7 @@ const defaultStorefrontHTML = `<!DOCTYPE html>
       } else {
         url += '&parse_intent=false';
       }
-      const res = await fetch(url);
+      const res = await fetch(url, { headers: getStorefrontAuthHeaders() });
       const data = await res.json();
       if (!res.ok) {
         document.getElementById('meta').textContent = 'Error: ' + (data.error || ('Request failed with status ' + res.status));
@@ -650,7 +688,7 @@ const defaultStorefrontHTML = `<!DOCTYPE html>
               const curTenant = (document.getElementById('tenant_id') && document.getElementById('tenant_id').value.trim()) || 'default';
               await fetch('/api/session/events', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 'Content-Type': 'application/json', ...getStorefrontAuthHeaders() },
                 body: JSON.stringify({ session_id: curSid, product_id: p.id, event_type: 'click', tenant_id: curTenant })
               });
               runSearch();
@@ -681,7 +719,7 @@ const defaultStorefrontHTML = `<!DOCTYPE html>
           if (tenantId) autoUrl += '&tenant_id=' + encodeURIComponent(tenantId);
           if (locale) autoUrl += '&locale=' + encodeURIComponent(locale);
           try {
-            const res = await fetch(autoUrl);
+            const res = await fetch(autoUrl, { headers: getStorefrontAuthHeaders() });
             if (!res.ok) return;
             const data = await res.json();
             while (qDatalist.firstChild) qDatalist.removeChild(qDatalist.firstChild);

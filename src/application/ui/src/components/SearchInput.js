@@ -17,6 +17,7 @@
 import React, { useState, useEffect, useRef, useCallback, memo } from 'react';
 import axios from 'axios';
 import config from '../config';
+import { getServingAuthHeaders } from '../services/apiAuth';
 import {
     TextField,
     InputAdornment,
@@ -138,7 +139,11 @@ const SearchInput = memo(({
             });
             if (tenantId) params.append('tenant_id', tenantId);
             if (locale) params.append('locale', locale);
-            const res = await axios.get(`${config.apiUrl}/api/autocomplete?${params.toString()}`);
+            const res = await axios.get(`${config.apiUrl}/api/autocomplete?${params.toString()}`, {
+                headers: {
+                    ...getServingAuthHeaders(),
+                },
+            });
             if (res.data && Array.isArray(res.data.suggestions)) {
                 setSuggestions(res.data.suggestions);
                 setIsOpen(res.data.suggestions.length > 0);

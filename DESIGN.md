@@ -25,7 +25,8 @@ The serving binary (`cmd/server/main.go`) owns every request path. Spanner is th
 
 | Concern | File(s) |
 |---|---|
-| Routing, embedded storefront | `internal/api/routes.go` |
+| Routing, CORS, embedded storefront | `internal/api/routes.go` |
+| API authentication & OIDC verification | `internal/api/auth.go` (`AuthorizeAPI`, `DefaultTokenVerifier`) |
 | Request handling, orchestration | `internal/api/handlers.go` (`Search`, `Autocomplete`, rules/synonyms/session/config endpoints) |
 | Request/response models | `internal/models/models.go` |
 | Configuration (env) | `internal/config/config.go` |
@@ -176,19 +177,19 @@ Vectors come from the active embedding column (`ProductVectors`) or the determin
 
 ## 15. API reference
 
-Base URL: the Cloud Run service URL (`<SERVICE_URL>`) or `http://localhost:8080`. Admin writes require header `X-Admin-Token` equal to `ADMIN_TOKEN` (constant-time comparison); they return 403 when the header is wrong or `ADMIN_TOKEN` is unset.
+Base URL: the Cloud Run service URL (`<SERVICE_URL>`) or `http://localhost:8080`. When API authentication is active (`REQUIRE_API_AUTH=true` — the default in `production` when `USE_MEMORY_STORE=false` — or whenever `API_TOKEN` or `SERVING_AUTH_AUDIENCE` is set), all non-health API routes require `X-API-Key` (`API_TOKEN`), `X-Admin-Token` (`ADMIN_TOKEN`), or a verified Google OIDC `Authorization: Bearer <id_token>` matching `SERVING_AUTH_AUDIENCE` and `SERVING_ALLOWED_PRINCIPALS` / `SERVING_ALLOWED_DOMAINS` (with `hd` matching the email domain); unconfigured production instances fail closed with `403`. Admin writes additionally require header `X-Admin-Token` equal to `ADMIN_TOKEN` (constant-time comparison) and return `403` when wrong or when `ADMIN_TOKEN` is unset. Credentialed CORS is enabled only for explicit origins in `ALLOWED_ORIGINS` (literal `*` is ignored).
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
 | GET | `/health`, `/healthz`, `/api/health` | public | Liveness (`status`, `backend_mode`) |
-| GET | `/api/info` | public | Models, embedding version/dimension, cache stats, product count |
-| GET / POST | `/api/config/embedding-version` | public / admin | Read / switch active embedding version (per instance) |
-| GET / POST | `/api/synonyms` | public / admin | List / upsert tenant-locale synonyms |
-| GET | `/api/autocomplete` | public | Typeahead (`q`, `locale`, `tenant_id`, `limit` ≤ 20) |
-| POST / GET | `/api/session/events` | public | Record / list session events |
-| GET | `/api/rules` | public | List merchandising rules (`tenant_id`) |
-| POST · PUT `/:id` · DELETE `/:id` | `/api/rules` | admin | Create / replace / delete rules |
-| GET / POST | `/api/search`, `/search` | public | Search |
+| GET | `/api/info` | api | Models, embedding version/dimension, cache stats, product count |
+| GET / POST | `/api/config/embedding-version` | api / api + admin | Read / switch active embedding version (per instance) |
+| GET / POST | `/api/synonyms` | api / api + admin | List / upsert tenant-locale synonyms |
+| GET | `/api/autocomplete` | api | Typeahead (`q`, `locale`, `tenant_id`, `limit` ≤ 20) |
+| POST / GET | `/api/session/events` | api | Record / list session events |
+| GET | `/api/rules` | api | List merchandising rules (`tenant_id`) |
+| POST · PUT `/:id` · DELETE `/:id` | `/api/rules` | api + admin | Create / replace / delete rules |
+| GET / POST | `/api/search`, `/search` | api | Search |
 | GET | `/` | public | Embedded storefront (or static React build when `STATIC_DIR` exists) |
 
 ### `/api/search` parameters (GET name = POST JSON name unless noted)
@@ -239,7 +240,13 @@ Base URL: the Cloud Run service URL (`<SERVICE_URL>`) or `http://localhost:8080`
 | `BOOST_WEIGHT` | 0.002 | Boost-signal scale (0–0.05) |
 | `SESSION_BOOST_WEIGHT` | 0.003 | Session boost scale (0–0.05) |
 | `LTR_MODEL_JSON` | — | Learned LTR model (falls back to baseline) |
-| `ADMIN_TOKEN` | — | Enables admin writes |
+| `REQUIRE_API_AUTH` | `true` (`production` & `!USE_MEMORY_STORE`) | Enforce fail-closed auth on non-health API routes |
+| `API_TOKEN` | — | Optional shared `X-API-Key` for read/query endpoints |
+| `ADMIN_TOKEN` | — | Enables admin writes (`X-Admin-Token`); also satisfies API auth |
+| `SERVING_AUTH_AUDIENCE` | — | Expected audience for Google OIDC `Authorization: Bearer` tokens |
+| `SERVING_ALLOWED_PRINCIPALS` | — | Comma-separated allowlisted OIDC email principals |
+| `SERVING_ALLOWED_DOMAINS` | — | Comma-separated allowlisted Workspace domains (`hd` must match email domain) |
+| `ALLOWED_ORIGINS` | — | Comma-separated explicit origins for credentialed CORS (`*` ignored) |
 | `DEFAULT_HYBRID_ALPHA`, `DEFAULT_LIMIT`, `MIN_SCORE_VALUE` | 0.5, 20, 0 | Search defaults |
 | `PORT`, `STATIC_DIR`, `ENVIRONMENT` | 8080, `/app/static`, `production` | Server |
 | `SPANNER_DISABLE_BUILTIN_METRICS` | — | Set `true` in production to silence client metrics export |

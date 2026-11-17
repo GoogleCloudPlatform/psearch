@@ -27,3 +27,18 @@ output "ingestion_source_service_account_email" {
   description = "The email address of the dedicated ingestion source service account"
   value       = google_service_account.ingestion_source_service_account.email
 }
+
+output "gen_ai_service_account_email" {
+  description = "The email address of the dedicated gen-ai-service account"
+  value       = google_service_account.gen_ai_service_account.email
+}
+
+output "search_api_service_account_email" {
+  description = "The email address of the dedicated product-search-api service account"
+  value       = google_service_account.search_api_service_account.email
+}
+
+output "ui_service_account_email" {
+  description = "The email address of the dedicated psearch-ui service account"
+  value       = google_service_account.ui_service_account.email
+}
