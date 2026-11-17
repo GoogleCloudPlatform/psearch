@@ -11,13 +11,19 @@ import (
 )
 
 func SetupRouter(router *gin.Engine, cfg *config.Config) {
-	router.Use(cors.New(cors.Config{
-		AllowOrigins:     []string{"*"},
-		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization"},
-		ExposeHeaders:    []string{"Content-Length"},
-		AllowCredentials: true,
-	}))
+	SetupRouterWithVerifier(router, cfg, DefaultTokenVerifier)
+}
+
+func SetupRouterWithVerifier(router *gin.Engine, cfg *config.Config, verifier TokenVerifier) {
+	if origins := config.SanitizeAllowedOrigins(cfg.AllowedOrigins); len(origins) > 0 {
+		router.Use(cors.New(cors.Config{
+			AllowOrigins:     origins,
+			AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+			AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization", "X-API-Key", "X-Admin-Token"},
+			ExposeHeaders:    []string{"Content-Length"},
+			AllowCredentials: true,
+		}))
+	}
 
 	router.Use(LoggerMiddleware())
 
@@ -29,22 +35,24 @@ func SetupRouter(router *gin.Engine, cfg *config.Config) {
 	router.GET("/health", controller.HealthCheck)
 	router.GET("/healthz", controller.HealthCheck)
 	router.GET("/api/health", controller.HealthCheck)
-	router.GET("/api/info", controller.Info)
-	router.GET("/api/config/embedding-version", controller.GetEmbeddingVersion)
-	router.POST("/api/config/embedding-version", controller.SetEmbeddingVersion)
-	router.GET("/api/synonyms", controller.ListSynonyms)
-	router.POST("/api/synonyms", controller.UpsertSynonym)
-	router.GET("/api/autocomplete", controller.Autocomplete)
-	router.POST("/api/session/events", controller.RecordSessionEvent)
-	router.GET("/api/session/events", controller.ListSessionEvents)
-	router.GET("/api/rules", controller.ListRules)
-	router.POST("/api/rules", controller.CreateRule)
-	router.PUT("/api/rules/:id", controller.UpdateRule)
-	router.DELETE("/api/rules/:id", controller.DeleteRule)
-	router.GET("/search", controller.Search)
-	router.POST("/search", controller.Search)
-	router.GET("/api/search", controller.Search)
-	router.POST("/api/search", controller.Search)
+
+	apiGroup := router.Group("", AuthorizeAPI(cfg, verifier))
+	apiGroup.GET("/api/info", controller.Info)
+	apiGroup.GET("/api/config/embedding-version", controller.GetEmbeddingVersion)
+	apiGroup.POST("/api/config/embedding-version", controller.SetEmbeddingVersion)
+	apiGroup.GET("/api/synonyms", controller.ListSynonyms)
+	apiGroup.POST("/api/synonyms", controller.UpsertSynonym)
+	apiGroup.GET("/api/autocomplete", controller.Autocomplete)
+	apiGroup.POST("/api/session/events", controller.RecordSessionEvent)
+	apiGroup.GET("/api/session/events", controller.ListSessionEvents)
+	apiGroup.GET("/api/rules", controller.ListRules)
+	apiGroup.POST("/api/rules", controller.CreateRule)
+	apiGroup.PUT("/api/rules/:id", controller.UpdateRule)
+	apiGroup.DELETE("/api/rules/:id", controller.DeleteRule)
+	apiGroup.GET("/search", controller.Search)
+	apiGroup.POST("/search", controller.Search)
+	apiGroup.GET("/api/search", controller.Search)
+	apiGroup.POST("/api/search", controller.Search)
 
 	if cfg.StaticDir != "" {
 		if info, err := os.Stat(cfg.StaticDir); err == nil && info.IsDir() {
@@ -228,6 +236,30 @@ const defaultStorefrontHTML = `<!DOCTYPE html>
     </div>
   </main>
   <script>
+    function getStorefrontAuthHeaders() {
+      const headers = {};
+      try {
+        const bearer = (
+          (typeof sessionStorage !== 'undefined' && sessionStorage.getItem('psearchAuthToken')) ||
+          (typeof localStorage !== 'undefined' && localStorage.getItem('psearchAuthToken')) ||
+          ''
+        ).trim();
+        if (bearer) {
+          headers['Authorization'] = /^bearer\s+/i.test(bearer) ? bearer : ('Bearer ' + bearer);
+        }
+        const apiKey = (
+          (typeof sessionStorage !== 'undefined' && (sessionStorage.getItem('psearch_api_token') || sessionStorage.getItem('psearchApiToken'))) ||
+          (typeof localStorage !== 'undefined' && (localStorage.getItem('psearch_api_token') || localStorage.getItem('psearchApiToken'))) ||
+          ''
+        ).trim();
+        if (apiKey) {
+          headers['X-API-Key'] = apiKey;
+        }
+      } catch (e) {
+        // Ignore storage errors in restricted browser contexts.
+      }
+      return headers;
+    }
     async function runSearch(opts) {
       opts = opts || {};
       const q = document.getElementById('q').value;
@@ -290,7 +322,7 @@ const defaultStorefrontHTML = `<!DOCTYPE html>
       } else {
         url += '&parse_intent=false';
       }
-      const res = await fetch(url);
+      const res = await fetch(url, { headers: getStorefrontAuthHeaders() });
       const data = await res.json();
       if (!res.ok) {
         document.getElementById('meta').textContent = 'Error: ' + (data.error || ('Request failed with status ' + res.status));
@@ -650,7 +682,7 @@ const defaultStorefrontHTML = `<!DOCTYPE html>
               const curTenant = (document.getElementById('tenant_id') && document.getElementById('tenant_id').value.trim()) || 'default';
               await fetch('/api/session/events', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 'Content-Type': 'application/json', ...getStorefrontAuthHeaders() },
                 body: JSON.stringify({ session_id: curSid, product_id: p.id, event_type: 'click', tenant_id: curTenant })
               });
               runSearch();
@@ -681,7 +713,7 @@ const defaultStorefrontHTML = `<!DOCTYPE html>
           if (tenantId) autoUrl += '&tenant_id=' + encodeURIComponent(tenantId);
           if (locale) autoUrl += '&locale=' + encodeURIComponent(locale);
           try {
-            const res = await fetch(autoUrl);
+            const res = await fetch(autoUrl, { headers: getStorefrontAuthHeaders() });
             if (!res.ok) return;
             const data = await res.json();
             while (qDatalist.firstChild) qDatalist.removeChild(qDatalist.firstChild);
