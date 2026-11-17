@@ -99,10 +99,17 @@ function readEnv(key) {
 }
 
 function normalizeBearerToken(rawToken) {
-  if (!rawToken) {
+  if (typeof rawToken !== 'string') {
     return '';
   }
-  return rawToken.replace(/^bearer\s+/i, '').trim();
+  return rawToken.trim().replace(/^bearer(?:\s+|$)/i, '').trim();
+}
+
+function readBearerStorage(key) {
+  return (
+    normalizeBearerToken(readSingleStorage('sessionStorage', key)) ||
+    normalizeBearerToken(readSingleStorage('localStorage', key))
+  );
 }
 
 /**
@@ -111,9 +118,9 @@ function normalizeBearerToken(rawToken) {
  * `X-Admin-Token`) to align with non-fallthrough backend validation.
  */
 export function getGenAiAuthHeaders() {
-  const bearerToken = normalizeBearerToken(
-    readStorage('genAiAuthToken') || readStorage('psearchAuthToken')
-  );
+  const bearerToken =
+    readBearerStorage('genAiAuthToken') ||
+    readBearerStorage('psearchAuthToken');
   const adminToken =
     readStorage('genAiAdminToken') || readEnv('REACT_APP_GEN_AI_ADMIN_TOKEN');
 
@@ -131,7 +138,7 @@ export function getGenAiAuthHeaders() {
  * `X-API-Key`) to align with non-fallthrough `AuthorizeAPI` validation.
  */
 export function getServingAuthHeaders() {
-  const bearerToken = normalizeBearerToken(readStorage('psearchAuthToken'));
+  const bearerToken = readBearerStorage('psearchAuthToken');
   const apiToken =
     readStorage('psearchApiToken') ||
     readStorage('psearch_api_token') ||

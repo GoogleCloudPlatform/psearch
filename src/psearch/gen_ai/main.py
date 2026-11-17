@@ -20,6 +20,7 @@ import os
 import re
 import threading
 from typing import Any, Callable, Dict, List, Optional, Tuple
+import urllib.parse
 import uuid
 
 from fastapi import (
@@ -243,7 +244,7 @@ def _sanitize_sql_genai_error(
 
 
 def _sanitize_bq_validation_message(raw: str) -> str:
-    """Strip REST transport prefixes and URLs from BigQuery BadRequest messages."""
+    """Strip REST transport prefixes and URLs from BigQuery validation messages."""
     cleaned = raw.strip()
     cleaned = re.sub(
         r"^(?:\d{3}\s+)?(?:GET|POST|PUT|DELETE|PATCH)\s+https?://\S+?:\s*",
@@ -251,6 +252,7 @@ def _sanitize_bq_validation_message(raw: str) -> str:
         cleaned,
         flags=re.IGNORECASE,
     )
+    cleaned = re.sub(r"^\d{3}\s+", "", cleaned)
     cleaned = re.sub(r"https?://\S+", "[redacted-url]", cleaned)
     cleaned = re.sub(
         r"\b[a-zA-Z][a-zA-Z0-9+.-]*://\S+",
@@ -1187,6 +1189,59 @@ async def analyze_sql_diff(
         )
 
 
+def _sanitize_allowed_origins(raw_value: str) -> List[str]:
+    """Normalize explicit HTTP(S) CORS origins and skip wildcard or malformed entries."""
+    origins: List[str] = []
+    seen: set[str] = set()
+    for part in raw_value.split(","):
+        candidate = part.strip()
+        if not candidate:
+            continue
+        if "*" in candidate:
+            logger.warning(
+                "Ignoring wildcard %r in ALLOWED_ORIGINS; explicit origins are required",
+                candidate,
+            )
+            continue
+        if "?" in candidate or "#" in candidate or any(ch.isspace() for ch in candidate):
+            logger.warning(
+                "Ignoring malformed origin %r in ALLOWED_ORIGINS",
+                candidate,
+            )
+            continue
+        parsed = urllib.parse.urlsplit(candidate)
+        scheme = parsed.scheme.lower()
+        try:
+            _ = parsed.port
+        except ValueError:
+            logger.warning(
+                "Ignoring invalid port in ALLOWED_ORIGINS entry %r",
+                candidate,
+            )
+            continue
+        if (
+            scheme not in {"http", "https"}
+            or not parsed.netloc
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or "@" in parsed.netloc
+            or parsed.query
+            or parsed.fragment
+            or parsed.path not in ("", "/")
+        ):
+            logger.warning(
+                "Ignoring malformed origin %r in ALLOWED_ORIGINS",
+                candidate,
+            )
+            continue
+        normalized = f"{scheme}://{parsed.netloc.lower()}"
+        if normalized not in seen:
+            seen.add(normalized)
+            origins.append(normalized)
+    return origins
+
+
 def create_app() -> FastAPI:
     """Create and configure the Gen AI FastAPI application instance."""
     reset_limiters()
@@ -1202,19 +1257,7 @@ def create_app() -> FastAPI:
         openapi_url=None,
     )
 
-    raw_origins = [
-        origin.strip()
-        for origin in os.environ.get("ALLOWED_ORIGINS", "").split(",")
-        if origin.strip()
-    ]
-    origins: List[str] = []
-    for origin in raw_origins:
-        if origin == "*":
-            logger.warning(
-                "Ignoring wildcard '*' in ALLOWED_ORIGINS; explicit origins are required"
-            )
-            continue
-        origins.append(origin)
+    origins = _sanitize_allowed_origins(os.environ.get("ALLOWED_ORIGINS", ""))
 
     @application.middleware("http")
     async def log_requests(request: Request, call_next):

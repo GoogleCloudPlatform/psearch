@@ -1122,3 +1122,54 @@ def test_os_permission_errors_config_value_errors_and_malformed_uploads_are_sani
             assert "/var/secrets/sa-key.json" not in global_os_perm.json()["detail"]
     finally:
         app.dependency_overrides.clear()
+
+
+def test_allowed_origins_normalizes_case_trailing_slash_and_rejects_malformed(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+):
+    monkeypatch.setenv(
+        "ALLOWED_ORIGINS",
+        "HTTPS://Shop.Example.com/, https://ui.example.com/, https://shop.example.com, "
+        "*, https://*.example.com, ftp://bad.example.com, https://bad.example.com/subpath, "
+        "https://user:pw@bad.example.com, https://bad.example.com?q=1, https://bad.example.com#frag",
+    )
+    with caplog.at_level("WARNING"):
+        cors_app = ingestion_main.create_app()
+    assert len(caplog.records) >= 5
+
+    with TestClient(cors_app) as client:
+        for allowed_origin in ("https://shop.example.com", "https://ui.example.com"):
+            resp = client.options(
+                "/datasets",
+                headers={
+                    "Origin": allowed_origin,
+                    "Access-Control-Request-Method": "POST",
+                },
+            )
+            assert resp.headers.get("access-control-allow-origin") == allowed_origin
+            assert resp.headers.get("access-control-allow-credentials") == "true"
+
+        for blocked_origin in ("https://bad.example.com", "https://evil.example.com"):
+            bad_resp = client.options(
+                "/datasets",
+                headers={
+                    "Origin": blocked_origin,
+                    "Access-Control-Request-Method": "POST",
+                },
+            )
+            assert bad_resp.status_code == 400
+            assert bad_resp.headers.get("access-control-allow-origin") is None
+
+    monkeypatch.setenv("ALLOWED_ORIGINS", "*, ftp://bad.example.com, https://bad.example.com/path")
+    empty_cors_app = ingestion_main.create_app()
+    with TestClient(empty_cors_app) as empty_client:
+        none_resp = empty_client.options(
+            "/datasets",
+            headers={
+                "Origin": "https://bad.example.com",
+                "Access-Control-Request-Method": "POST",
+            },
+        )
+        assert none_resp.headers.get("access-control-allow-origin") is None
+        assert none_resp.headers.get("access-control-allow-credentials") is None

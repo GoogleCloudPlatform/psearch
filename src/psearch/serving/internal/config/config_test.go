@@ -178,4 +178,25 @@ func TestLoadDefaultsRequireAPIAuthInProduction(t *testing.T) {
 			t.Fatal("RequireAPIAuth = false, want true when REQUIRE_API_AUTH=1")
 		}
 	})
+
+	t.Run("SanitizeAllowedOrigins normalizes uppercase scheme, host, trailing slash, deduplicates, and rejects malformed origins", func(t *testing.T) {
+		clearAuthEnv(t)
+		t.Setenv(
+			"ALLOWED_ORIGINS",
+			"HTTPS://Shop.Example.com/, https://ui.example.com/, https://shop.example.com, HTTP://Localhost:3000/, *, https://*.example.com, ftp://bad.example.com, https://user:pw@bad.example.com, https://bad.example.com/subpath, https://bad.example.com?q=1, https://bad.example.com#frag, https://:8080",
+		)
+
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		want := []string{
+			"https://shop.example.com",
+			"https://ui.example.com",
+			"http://localhost:3000",
+		}
+		if !reflect.DeepEqual(cfg.AllowedOrigins, want) {
+			t.Fatalf("AllowedOrigins = %#v, want %#v", cfg.AllowedOrigins, want)
+		}
+	})
 }

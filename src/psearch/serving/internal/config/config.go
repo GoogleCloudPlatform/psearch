@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -184,29 +185,50 @@ func parseDomainCSV(raw string) []string {
 	return out
 }
 
-// SanitizeAllowedOrigins trims whitespace and filters out empty or wildcard ("*")
-// entries so credentialed CORS never reflects arbitrary origins.
+// SanitizeAllowedOrigins parses, validates, and normalizes explicit HTTP(S) origins
+// (lowercasing scheme/host, stripping optional trailing "/", deduplicating, and
+// skipping empty, wildcard, or malformed entries) so credentialed CORS never panics
+// or reflects invalid origins.
 func SanitizeAllowedOrigins(rawOrigins []string) []string {
 	var out []string
-	warnedWildcard := false
+	seen := make(map[string]struct{})
 	for _, part := range rawOrigins {
 		v := strings.TrimSpace(part)
 		if v == "" {
 			continue
 		}
-		if v == "*" || strings.Contains(v, "*") {
-			if !warnedWildcard {
-				log.Printf("WARN: ignoring wildcard %q in ALLOWED_ORIGINS; specify explicit origins instead", v)
-				warnedWildcard = true
-			}
+		if strings.Contains(v, "*") {
+			log.Printf("WARN: ignoring wildcard %q in ALLOWED_ORIGINS; specify explicit origins instead", v)
 			continue
 		}
-		lower := strings.ToLower(v)
-		if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
-			log.Printf("WARN: ignoring invalid origin %q in ALLOWED_ORIGINS; expected http:// or https:// scheme", v)
+		if strings.ContainsAny(v, "?# \t\r\n") {
+			log.Printf("WARN: ignoring invalid origin %q in ALLOWED_ORIGINS", v)
 			continue
 		}
-		out = append(out, v)
+		u, err := url.Parse(v)
+		if err != nil {
+			log.Printf("WARN: ignoring invalid origin %q in ALLOWED_ORIGINS: %v", v, err)
+			continue
+		}
+		scheme := strings.ToLower(u.Scheme)
+		if (scheme != "http" && scheme != "https") ||
+			u.Opaque != "" ||
+			u.Host == "" ||
+			u.Hostname() == "" ||
+			u.User != nil ||
+			u.RawQuery != "" ||
+			u.ForceQuery ||
+			u.Fragment != "" ||
+			(u.Path != "" && u.Path != "/") ||
+			(u.RawPath != "" && u.RawPath != "/") {
+			log.Printf("WARN: ignoring invalid origin %q in ALLOWED_ORIGINS; expected bare http(s)://host[:port]", v)
+			continue
+		}
+		normalized := scheme + "://" + strings.ToLower(u.Host)
+		if _, exists := seen[normalized]; !exists {
+			seen[normalized] = struct{}{}
+			out = append(out, normalized)
+		}
 	}
 	return out
 }

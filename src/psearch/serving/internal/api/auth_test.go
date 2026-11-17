@@ -5,6 +5,10 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -390,6 +394,41 @@ func TestCORSBlocksWildcardOriginReflection(t *testing.T) {
 			t.Fatalf("Allow-Origin = %q, want https://ui.example.com", got)
 		}
 	})
+
+	t.Run("uppercase scheme and trailing slash in ALLOWED_ORIGINS do not panic SetupRouter and match browser Origin", func(t *testing.T) {
+		t.Setenv("USE_MEMORY_STORE", "true")
+		t.Setenv("ALLOWED_ORIGINS", "HTTPS://Shop.Example.com/, https://ui.example.com/")
+		loadedCfg, err := config.Load()
+		if err != nil {
+			t.Fatalf("config.Load() error = %v", err)
+		}
+
+		// Test both config.Load() output and raw unnormalized slice passed directly to SetupRouter.
+		for _, origins := range [][]string{
+			loadedCfg.AllowedOrigins,
+			{"HTTPS://Shop.Example.com/", "https://ui.example.com/"},
+		} {
+			r := newAuthTestRouter(&config.Config{
+				Environment:    "production",
+				RequireAPIAuth: true,
+				UseMemoryStore: true,
+				APIToken:       "read-key",
+				AllowedOrigins: origins,
+			}, nil)
+
+			pre := httptest.NewRequest(http.MethodOptions, "/api/search", nil)
+			pre.Header.Set("Origin", "https://shop.example.com")
+			pre.Header.Set("Access-Control-Request-Method", "GET")
+			wPre := httptest.NewRecorder()
+			r.ServeHTTP(wPre, pre)
+			if got := wPre.Header().Get("Access-Control-Allow-Origin"); got != "https://shop.example.com" {
+				t.Fatalf("preflight Allow-Origin = %q, want https://shop.example.com (status=%d)", got, wPre.Code)
+			}
+			if got := wPre.Header().Get("Access-Control-Allow-Credentials"); got != "true" {
+				t.Fatalf("preflight Allow-Credentials = %q, want true", got)
+			}
+		}
+	})
 }
 
 func TestStorefrontIncludesOptionalAuthHeaders(t *testing.T) {
@@ -398,10 +437,62 @@ func TestStorefrontIncludesOptionalAuthHeaders(t *testing.T) {
 		"psearchAuthToken",
 		"psearch_api_token",
 		"psearchApiToken",
+		"else if (apiKey)",
 	} {
 		if !strings.Contains(defaultStorefrontHTML, frag) {
 			t.Errorf("defaultStorefrontHTML missing %q", frag)
 		}
+	}
+
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; skipping storefront auth JS behavioral test")
+	}
+
+	fnMatch := regexp.MustCompile(`(?s)function getStorefrontAuthHeaders\(\)\s*\{.*?\n    \}`).FindString(defaultStorefrontHTML)
+	if fnMatch == "" {
+		t.Fatal("failed to extract getStorefrontAuthHeaders() from defaultStorefrontHTML")
+	}
+
+	jsHarness := fnMatch + `
+const assert = require("node:assert/strict");
+function makeStorage(obj) {
+  return { getItem(k) { return Object.prototype.hasOwnProperty.call(obj, k) ? obj[k] : null; } };
+}
+function withStorages(sess, loc, fn) {
+  globalThis.sessionStorage = makeStorage(sess);
+  globalThis.localStorage = makeStorage(loc);
+  return fn();
+}
+
+// 1. Stale psearch_api_token must NEVER shadow a valid psearchAuthToken (mutual exclusion via else if)
+assert.deepEqual(
+  withStorages({ psearchAuthToken: "valid-jwt", psearch_api_token: "stale-api-key" }, {}, () => getStorefrontAuthHeaders()),
+  { Authorization: "Bearer valid-jwt" }
+);
+
+// 2. Bare "Bearer" or "Bearer   " stripped to empty before truthiness -> falls back to localStorage or X-API-Key
+assert.deepEqual(
+  withStorages({ psearchAuthToken: "Bearer   " }, { psearchAuthToken: "Bearer local-jwt", psearch_api_token: "stale-key" }, () => getStorefrontAuthHeaders()),
+  { Authorization: "Bearer local-jwt" }
+);
+assert.deepEqual(
+  withStorages({ psearchAuthToken: "Bearer" }, { psearch_api_token: "fallback-api-key" }, () => getStorefrontAuthHeaders()),
+  { "X-API-Key": "fallback-api-key" }
+);
+
+// 3. Token starting with "bearer-" (hyphen, not whitespace) is preserved
+assert.deepEqual(
+  withStorages({ psearchAuthToken: "bearer-custom-tok" }, {}, () => getStorefrontAuthHeaders()),
+  { Authorization: "Bearer bearer-custom-tok" }
+);
+`
+	jsPath := filepath.Join(t.TempDir(), "storefront_auth_test.js")
+	if err := os.WriteFile(jsPath, []byte(jsHarness), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(node, jsPath).CombinedOutput(); err != nil {
+		t.Fatalf("storefront getStorefrontAuthHeaders behavioral test failed:\n%s", out)
 	}
 }
 

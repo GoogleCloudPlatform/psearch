@@ -238,25 +238,31 @@ const defaultStorefrontHTML = `<!DOCTYPE html>
   <script>
     function getStorefrontAuthHeaders() {
       const headers = {};
-      try {
-        const bearer = (
-          (typeof sessionStorage !== 'undefined' && sessionStorage.getItem('psearchAuthToken')) ||
-          (typeof localStorage !== 'undefined' && localStorage.getItem('psearchAuthToken')) ||
-          ''
-        ).trim();
-        if (bearer) {
-          headers['Authorization'] = /^bearer\s+/i.test(bearer) ? bearer : ('Bearer ' + bearer);
+      const normBearer = (raw) =>
+        typeof raw === 'string' ? raw.trim().replace(/^bearer(?:\s+|$)/i, '').trim() : '';
+      const normKey = (raw) => (typeof raw === 'string' ? raw.trim() : '');
+      const readStore = (getStore, key) => {
+        try {
+          const store = getStore();
+          return store && typeof store.getItem === 'function' ? store.getItem(key) : '';
+        } catch (e) {
+          return '';
         }
-        const apiKey = (
-          (typeof sessionStorage !== 'undefined' && (sessionStorage.getItem('psearch_api_token') || sessionStorage.getItem('psearchApiToken'))) ||
-          (typeof localStorage !== 'undefined' && (localStorage.getItem('psearch_api_token') || localStorage.getItem('psearchApiToken'))) ||
-          ''
-        ).trim();
-        if (apiKey) {
-          headers['X-API-Key'] = apiKey;
-        }
-      } catch (e) {
-        // Ignore storage errors in restricted browser contexts.
+      };
+      const sess = () => (typeof sessionStorage !== 'undefined' ? sessionStorage : null);
+      const loc = () => (typeof localStorage !== 'undefined' ? localStorage : null);
+      const bearer =
+        normBearer(readStore(sess, 'psearchAuthToken')) ||
+        normBearer(readStore(loc, 'psearchAuthToken'));
+      const apiKey =
+        normKey(readStore(sess, 'psearch_api_token')) ||
+        normKey(readStore(sess, 'psearchApiToken')) ||
+        normKey(readStore(loc, 'psearch_api_token')) ||
+        normKey(readStore(loc, 'psearchApiToken'));
+      if (bearer) {
+        headers['Authorization'] = 'Bearer ' + bearer;
+      } else if (apiKey) {
+        headers['X-API-Key'] = apiKey;
       }
       return headers;
     }

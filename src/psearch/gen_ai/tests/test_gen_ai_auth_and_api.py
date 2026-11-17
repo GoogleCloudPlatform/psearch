@@ -38,7 +38,7 @@ with warnings.catch_warnings():
     from fastapi.testclient import TestClient
 
 from fastapi import HTTPException
-from google.api_core.exceptions import BadRequest
+from google.api_core.exceptions import BadRequest, Forbidden, NotFound
 from google.auth.exceptions import GoogleAuthError
 from google.genai.types import FinishReason
 import pytest
@@ -51,6 +51,10 @@ try:
     from psearch.gen_ai.services.sql.common.input_validation import (
         MAX_GENERATED_SQL_CHARS,
     )
+    from psearch.gen_ai.services.sql.pipeline.transformation_pipeline import (
+        TransformationPipeline,
+    )
+    from psearch.gen_ai.services.sql.validation.sql_validator import SQLValidator
     from psearch.gen_ai.tasks import task_manager
 except ModuleNotFoundError as exc:
     if exc.name not in {
@@ -67,6 +71,10 @@ except ModuleNotFoundError as exc:
     from gen_ai.services.sql.common.input_validation import (
         MAX_GENERATED_SQL_CHARS,
     )
+    from gen_ai.services.sql.pipeline.transformation_pipeline import (
+        TransformationPipeline,
+    )
+    from gen_ai.services.sql.validation.sql_validator import SQLValidator
     from gen_ai.tasks import task_manager
 
 
@@ -1108,3 +1116,307 @@ def test_thread_local_auth_request_and_locked_service_cache_concurrency(
         assert len({id(inst) for inst in instances}) == 1
     finally:
         gen_ai_main.clear_service_cache()
+
+
+def test_ctas_dry_run_falls_back_to_inner_select_under_readonly_gen_ai_sa(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """CTAS dry run under read-only gen-ai-sa falls back to inner SELECT/WITH safely."""
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv("GEN_AI_ADMIN_TOKEN", "secret")
+    monkeypatch.setenv("PROJECT_ID", "readonly-proj")
+    monkeypatch.setenv("GENAI_LOCATION", "global")
+    auth_headers = {"X-Admin-Token": "secret"}
+
+    mock_genai_client = MagicMock()
+    mock_bq_client = MagicMock()
+    monkeypatch.setattr("google.genai.Client", lambda **kwargs: mock_genai_client)
+    monkeypatch.setattr("google.cloud.bigquery.Client", lambda **kwargs: mock_bq_client)
+    gen_ai_main.clear_service_cache()
+
+    ok_job = MagicMock(
+        total_bytes_processed=2048,
+        job_id="dry-run-inner-1",
+        location="US",
+    )
+
+    try:
+        validator = SQLValidator(project_id="readonly-proj")
+
+        # 1a. Outer CTAS raises Forbidden (bigquery.tables.create) -> inner SELECT dry run succeeds
+        ctas_with_options = (
+            "-- header comment with ; and AS SELECT 999\n"
+            "CREATE OR REPLACE TABLE `readonly-proj.psearch.products` "
+            "PARTITION BY DATE(CAST(created_at AS TIMESTAMP)) "
+            "CLUSTER BY id "
+            'OPTIONS(description="AS SELECT 1; DROP TABLE x") '
+            "AS SELECT id, 'a;b' AS tag FROM `readonly-proj.psearch_raw.catalog`;"
+        )
+        seen_queries = []
+
+        def _ctas_forbidden_then_ok(sql: str, job_config: Any = None, timeout: Any = None):
+            seen_queries.append(sql)
+            if sql.lstrip().startswith(("--", "CREATE")):
+                raise Forbidden(
+                    "POST https://bigquery.googleapis.com/bigquery/v2/projects/readonly-proj/jobs: "
+                    "Access Denied: Dataset readonly-proj:psearch: User does not have "
+                    "bigquery.tables.create permission in dataset readonly-proj:psearch."
+                )
+            return ok_job
+
+        mock_bq_client.query.side_effect = _ctas_forbidden_then_ok
+        res_forbidden = validator.validate_sql_dry_run(ctas_with_options)
+        assert res_forbidden["valid"] is True
+        assert res_forbidden["details"]["estimated_bytes_processed"] == 2048
+        assert len(seen_queries) == 2
+        assert (
+            seen_queries[1]
+            == "SELECT id, 'a;b' AS tag FROM `readonly-proj.psearch_raw.catalog`"
+        )
+
+        # 1b. Outer CTAS with destination dataset NotFound + CTE WITH body -> inner WITH succeeds
+        ctas_temp_with = (
+            "CREATE TEMP TABLE IF NOT EXISTS tmp_items AS "
+            "WITH base AS (SELECT id FROM `readonly-proj.psearch_raw.catalog`) "
+            "SELECT id FROM base ;  -- trailing comment\n"
+        )
+        seen_queries.clear()
+
+        def _ctas_not_found_then_ok(sql: str, job_config: Any = None, timeout: Any = None):
+            seen_queries.append(sql)
+            if sql.lstrip().upper().startswith("CREATE"):
+                raise NotFound(
+                    "GET https://bigquery.googleapis.com/bigquery/v2/projects/readonly-proj/datasets/dest_ds: "
+                    "Not found: Dataset readonly-proj:dest_ds was not found in location US"
+                )
+            return ok_job
+
+        mock_bq_client.query.side_effect = _ctas_not_found_then_ok
+        res_not_found = validator.validate_sql_dry_run(ctas_temp_with)
+        assert res_not_found["valid"] is True
+        assert len(seen_queries) == 2
+        assert seen_queries[1] == (
+            "WITH base AS (SELECT id FROM `readonly-proj.psearch_raw.catalog`) "
+            "SELECT id FROM base"
+        )
+
+        # 2. Outer CTAS raises Forbidden, inner SELECT raises BadRequest("Invalid field reference 'foo'")
+        #    -> returns valid: False with details["missing_field"] == "foo" and REST URLs scrubbed
+        def _ctas_forbidden_then_bad_col(sql: str, job_config: Any = None, timeout: Any = None):
+            if sql.lstrip().upper().startswith("CREATE"):
+                raise Forbidden("Access Denied: bigquery.tables.create")
+            raise BadRequest(
+                "POST https://bigquery.googleapis.com/bigquery/v2/projects/secret-proj/jobs: "
+                "Invalid field reference 'foo' [at 1:8]"
+            )
+
+        mock_bq_client.query.side_effect = _ctas_forbidden_then_bad_col
+        res_bad_col = validator.validate_sql_dry_run(
+            "CREATE OR REPLACE TABLE `readonly-proj.psearch.products` AS "
+            "SELECT foo FROM `readonly-proj.psearch_raw.catalog`"
+        )
+        assert res_bad_col["valid"] is False
+        assert res_bad_col["details"]["missing_field"] == "foo"
+        assert "https://bigquery.googleapis.com" not in (res_bad_col.get("error_message") or "")
+
+        # 3. Multi-statement SQL or non-CTAS SQL is NEVER extracted; OPTIONS(description="AS SELECT 1") IS extracted cleanly
+        for rejected_sql in (
+            "CREATE OR REPLACE TABLE t AS SELECT 1; DROP TABLE x",
+            "CREATE OR REPLACE TABLE t AS SELECT 1; DROP TABLE x;",
+            "CREATE TABLE t (id INT64); SELECT 1 AS id",
+            "CREATE OR REPLACE TABLE t AS DROP TABLE x",
+            "SELECT * FROM `readonly-proj.psearch_raw.missing_tbl`",
+        ):
+            seen_queries.clear()
+            mock_bq_client.query.side_effect = lambda sql, **kw: (
+                seen_queries.append(sql),
+                (_ for _ in ()).throw(
+                    Forbidden(
+                        "POST https://bigquery.googleapis.com/bigquery/v2/projects/secret-proj/jobs: "
+                        "Access Denied: Table secret-proj:raw.tbl"
+                    )
+                ),
+            )[1]
+            res_rejected = validator.validate_sql_dry_run(rejected_sql)
+            assert res_rejected["valid"] is False
+            assert len(seen_queries) == 1, f"Must not retry inner query for: {rejected_sql}"
+            assert res_rejected["details"] == {"reason": "access_denied"}
+            assert "error_type" not in res_rejected["details"]
+            assert "https://bigquery.googleapis.com" not in res_rejected["error"]
+            assert "https://bigquery.googleapis.com" not in res_rejected["error_message"]
+
+        seen_queries.clear()
+
+        def _options_as_check(sql: str, **kw: Any) -> Any:
+            seen_queries.append(sql)
+            if len(seen_queries) == 1:
+                raise Forbidden("Access Denied: bigquery.tables.create")
+            return ok_job
+
+        mock_bq_client.query.side_effect = _options_as_check
+        res_opts = validator.validate_sql_dry_run(
+            'CREATE OR REPLACE TABLE t OPTIONS(description="AS SELECT 1") AS SELECT id FROM src'
+        )
+        assert res_opts["valid"] is True
+        assert seen_queries == [
+            'CREATE OR REPLACE TABLE t OPTIONS(description="AS SELECT 1") AS SELECT id FROM src',
+            "SELECT id FROM src",
+        ]
+
+        # 4. POST /sql/validate HTTP integration:
+        #    - CTAS Forbidden -> 200 valid: True
+        #    - Inner SELECT NotFound / Forbidden on source table -> 200 valid: False (NOT 500!) with URLs scrubbed
+        app = gen_ai_main.create_app()
+        with TestClient(app) as client:
+            mock_bq_client.query.side_effect = _ctas_forbidden_then_ok
+            http_ctas_ok = client.post(
+                "/sql/validate",
+                headers=auth_headers,
+                json={"sql_script": ctas_with_options},
+            )
+            assert http_ctas_ok.status_code == 200
+            assert http_ctas_ok.json()["valid"] is True
+
+            def _ctas_inner_source_not_found(sql: str, **kw: Any) -> Any:
+                if sql.lstrip().upper().startswith("CREATE"):
+                    raise Forbidden("Access Denied: bigquery.tables.create")
+                raise NotFound(
+                    "GET https://bigquery.googleapis.com/bigquery/v2/projects/secret-proj/tables/src: "
+                    "Not found: Table readonly-proj:psearch_raw.missing_src was not found in location US"
+                )
+
+            mock_bq_client.query.side_effect = _ctas_inner_source_not_found
+            http_src_nf = client.post(
+                "/sql/validate",
+                headers=auth_headers,
+                json={
+                    "sql_script": (
+                        "CREATE OR REPLACE TABLE `readonly-proj.psearch.products` AS "
+                        "SELECT id FROM `readonly-proj.psearch_raw.missing_src`"
+                    )
+                },
+            )
+            assert http_src_nf.status_code == 200
+            nf_body = http_src_nf.json()
+            assert nf_body["valid"] is False
+            assert nf_body["details"] == {"reason": "not_found"}
+            assert "https://bigquery.googleapis.com" not in http_src_nf.text
+            assert "secret-proj" not in http_src_nf.text
+            assert "missing_src" in nf_body["error"]
+            assert nf_body["error"] == nf_body["error_message"]
+
+            def _ctas_inner_source_forbidden(sql: str, **kw: Any) -> Any:
+                if sql.lstrip().upper().startswith("CREATE"):
+                    raise Forbidden("Access Denied: bigquery.tables.create")
+                raise Forbidden(
+                    "POST https://bigquery.googleapis.com/bigquery/v2/projects/secret-proj/jobs: "
+                    "Access Denied: Table readonly-proj:restricted.src: User does not have permission."
+                )
+
+            mock_bq_client.query.side_effect = _ctas_inner_source_forbidden
+            http_src_forb = client.post(
+                "/sql/validate",
+                headers=auth_headers,
+                json={
+                    "sql_script": (
+                        "CREATE OR REPLACE TABLE `readonly-proj.psearch.products` AS "
+                        "SELECT id FROM `readonly-proj.restricted.src`"
+                    )
+                },
+            )
+            assert http_src_forb.status_code == 200
+            forb_body = http_src_forb.json()
+            assert forb_body["valid"] is False
+            assert forb_body["details"] == {"reason": "access_denied"}
+            assert "https://bigquery.googleapis.com" not in http_src_forb.text
+            assert "secret-proj" not in http_src_forb.text
+
+        # 5. TransformationPipeline end-to-end: CTAS raising Forbidden on destination table
+        #    succeeds on attempt 1 without invoking SQLFixer!
+        pipeline = TransformationPipeline(project_id="readonly-proj", location="global")
+        generated_ctas = (
+            "CREATE OR REPLACE TABLE `readonly-proj.psearch.products` AS "
+            "SELECT id, title AS name FROM `readonly-proj.psearch_raw.catalog`"
+        )
+        pipeline.initial_generator.generate = MagicMock(
+            return_value=(generated_ctas, None)
+        )
+        pipeline.field_analyzer.identify_defaulted_fields = MagicMock(return_value=[])
+        pipeline.sql_fixer.fix_sql = MagicMock()
+        mock_bq_client.query.side_effect = _ctas_forbidden_then_ok
+
+        pipeline_task_id = str(uuid.uuid4())
+        task_manager.init_task(pipeline_task_id, task_type="sql_generation")
+        pipeline.execute_pipeline(
+            task_id=pipeline_task_id,
+            source_table_name="readonly-proj.psearch_raw.catalog",
+            destination_table_name="readonly-proj.psearch.products",
+            source_schema_fields=["id", "title"],
+            destination_schema={
+                "fields": [
+                    {"name": "id", "type": "STRING", "mode": "REQUIRED"},
+                    {"name": "name", "type": "STRING", "mode": "REQUIRED"},
+                ]
+            },
+            source_data_sample_json='[{"id": "1", "title": "Runner"}]',
+        )
+        final_status = task_manager.get_task_status(pipeline_task_id)
+        assert final_status is not None
+        assert final_status["status"] == "completed"
+        assert final_status["result"] == generated_ctas
+        pipeline.sql_fixer.fix_sql.assert_not_called()
+    finally:
+        gen_ai_main.clear_service_cache()
+
+
+def test_allowed_origins_normalizes_case_and_trailing_slash_and_skips_malformed(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+):
+    """ALLOWED_ORIGINS normalizes scheme/host case & trailing '/' and rejects malformed origins."""
+    monkeypatch.setenv(
+        "ALLOWED_ORIGINS",
+        "HTTPS://Shop.Example.com/, https://ui.example.com/, https://shop.example.com, "
+        "*, https://*.example.com, ftp://bad.example.com, https://bad.example.com/subpath, "
+        "https://user:pw@bad.example.com, https://bad.example.com?q=1, https://bad.example.com#frag",
+    )
+    with caplog.at_level("WARNING"):
+        cors_app = gen_ai_main.create_app()
+    assert len(caplog.records) >= 5
+
+    with TestClient(cors_app) as client:
+        for allowed_origin in ("https://shop.example.com", "https://ui.example.com"):
+            resp = client.options(
+                "/conversational-search",
+                headers={
+                    "Origin": allowed_origin,
+                    "Access-Control-Request-Method": "POST",
+                },
+            )
+            assert resp.headers.get("access-control-allow-origin") == allowed_origin
+            assert resp.headers.get("access-control-allow-credentials") == "true"
+
+        for blocked_origin in ("https://bad.example.com", "https://evil.example.com"):
+            bad_resp = client.options(
+                "/conversational-search",
+                headers={
+                    "Origin": blocked_origin,
+                    "Access-Control-Request-Method": "POST",
+                },
+            )
+            assert bad_resp.status_code == 400
+            assert bad_resp.headers.get("access-control-allow-origin") is None
+
+    # All-invalid ALLOWED_ORIGINS produces empty allowlist and disables credentials
+    monkeypatch.setenv("ALLOWED_ORIGINS", "*, ftp://bad.example.com, https://bad.example.com/path")
+    empty_cors_app = gen_ai_main.create_app()
+    with TestClient(empty_cors_app) as empty_client:
+        none_resp = empty_client.options(
+            "/conversational-search",
+            headers={
+                "Origin": "https://bad.example.com",
+                "Access-Control-Request-Method": "POST",
+            },
+        )
+        assert none_resp.headers.get("access-control-allow-origin") is None
+        assert none_resp.headers.get("access-control-allow-credentials") is None

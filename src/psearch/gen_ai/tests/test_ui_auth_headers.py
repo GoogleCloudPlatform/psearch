@@ -433,6 +433,47 @@ def test_api_auth_precedence_and_runtime_guards():
           Authorization: "Bearer shared-bearer-tok",
         });
 
+        // Bare "Bearer" / "Bearer   " in genAiAuthToken must NOT short-circuit || or emit "Bearer Bearer"
+        installBrowserStorages(
+          {
+            genAiAuthToken: "Bearer",
+            psearchAuthToken: "Bearer valid-fallback-jwt",
+            genAiAdminToken: "storage-genai-admin",
+          },
+          {}
+        );
+        assert.deepEqual(getGenAiAuthHeaders(), {
+          Authorization: "Bearer valid-fallback-jwt",
+        });
+
+        // Bare "Bearer   " in sessionStorage must fall back to localStorage for the same key
+        installBrowserStorages(
+          { genAiAuthToken: "local-genai-jwt" },
+          { genAiAuthToken: "  bearer   " }
+        );
+        assert.deepEqual(getGenAiAuthHeaders(), {
+          Authorization: "Bearer local-genai-jwt",
+        });
+
+        // Bare "Bearer" in both bearer slots falls through cleanly to X-Admin-Token (never "Bearer Bearer")
+        installBrowserStorages(
+          {
+            genAiAuthToken: "Bearer",
+            psearchAuthToken: "  BEARER  ",
+            genAiAdminToken: "storage-genai-admin",
+          },
+          {}
+        );
+        assert.deepEqual(getGenAiAuthHeaders(), {
+          "X-Admin-Token": "storage-genai-admin",
+        });
+
+        // Token starting with "bearer-" (hyphen, not whitespace) is preserved intact
+        installBrowserStorages({ genAiAuthToken: "bearer-opaque-123" }, {});
+        assert.deepEqual(getGenAiAuthHeaders(), {
+          Authorization: "Bearer bearer-opaque-123",
+        });
+
         // Fallback to genAiAdminToken when no bearer token is present
         installBrowserStorages({ genAiAdminToken: "storage-genai-admin" }, {});
         assert.deepEqual(getGenAiAuthHeaders(), {
@@ -459,6 +500,26 @@ def test_api_auth_precedence_and_runtime_guards():
         process.env.REACT_APP_API_TOKEN = "env-api-key";
         assert.deepEqual(getServingAuthHeaders(), {
           Authorization: "Bearer serving-oidc-jwt",
+        });
+
+        // Bare "Bearer" in psearchAuthToken must NOT emit "Bearer Bearer"; must fall back to X-API-Key
+        installBrowserStorages(
+          {
+            psearchAuthToken: "Bearer",
+            psearchApiToken: "camel-api-key",
+          },
+          {}
+        );
+        assert.deepEqual(getServingAuthHeaders(), {
+          "X-API-Key": "camel-api-key",
+        });
+
+        installBrowserStorages(
+          { psearchAuthToken: "local-serving-jwt" },
+          { psearchAuthToken: "  Bearer   " }
+        );
+        assert.deepEqual(getServingAuthHeaders(), {
+          Authorization: "Bearer local-serving-jwt",
         });
 
         installBrowserStorages(
