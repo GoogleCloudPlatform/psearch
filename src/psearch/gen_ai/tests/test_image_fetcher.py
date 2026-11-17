@@ -257,6 +257,11 @@ def test_validate_and_normalize_image_url_accepts_valid_https_and_gs(
         "https://example.com/a b.png",
         "https://example.com/a.png\r\nHost: evil",
         "https://example.com/a\x00.png",
+        "https://example.com/a\x7f.png",
+        "https://example.com/a\x80.png",
+        "https://example.com/a.png?q=\x9b1",
+        "gs://my-bucket/a\x80.png",
+        "gs://my-bucket/path/\x9fitem.png",
         "https://evil.example.com\\@good.example.com/a.png",
         # gs:// path traversal & bucket validation failures
         "gs://my-bucket/../secret.png",
@@ -327,6 +332,109 @@ def test_allowed_image_hosts_env_and_explicit_filtering(
         validate_and_normalize_image_url(
             "https://metadata.google.internal/computeMetadata/v1/"
         )
+
+    # Explicit non-empty allowed_hosts normalizes entries and overrides env allowlist.
+    monkeypatch.setenv("GEN_AI_ALLOWED_IMAGE_HOSTS", "env-only.example.com")
+    exp_url, exp_host = validate_and_normalize_image_url(
+        "https://Explicit.Example.ORG./item.png",
+        allowed_hosts={" Explicit.Example.ORG. "},
+    )
+    assert exp_url == "https://explicit.example.org/item.png"
+    assert exp_host == "explicit.example.org"
+
+    with pytest.raises(ImageValidationError):
+        validate_and_normalize_image_url(
+            "https://env-only.example.com/item.png",
+            allowed_hosts={"explicit.example.org"},
+        )
+
+    assert fetch_validated_product_image(
+        "https://explicit.example.org/item.png",
+        allowed_hosts={"Explicit.Example.ORG."},
+        resolver=lambda h, p, type=0: [_addrinfo_v4("93.184.216.34", p)],
+        session_factory=lambda h, ips: _FakeSession(
+            lambda u, **kw: _FakeStreamResponse(
+                status_code=200,
+                headers={"Content-Type": "image/png"},
+                chunks=[SAMPLE_PNG],
+            )
+        ),
+    ) == (SAMPLE_PNG, "image/png")
+
+    # Explicit empty set() MUST fail closed (reject all hosts), even when env var is set or unset.
+    with pytest.raises(ImageValidationError):
+        validate_and_normalize_image_url(
+            "https://env-only.example.com/item.png",
+            allowed_hosts=set(),
+        )
+    assert (
+        fetch_validated_product_image(
+            "https://env-only.example.com/item.png",
+            allowed_hosts=set(),
+            resolver=lambda h, p, type=0: [_addrinfo_v4("93.184.216.34", p)],
+            session_factory=lambda h, ips: _FakeSession(
+                lambda u, **kw: _FakeStreamResponse(
+                    status_code=200,
+                    headers={"Content-Type": "image/png"},
+                    chunks=[SAMPLE_PNG],
+                )
+            ),
+        )
+        is None
+    )
+
+    monkeypatch.delenv("GEN_AI_ALLOWED_IMAGE_HOSTS", raising=False)
+    with pytest.raises(ImageValidationError):
+        validate_and_normalize_image_url(
+            "https://cdn.example.com/item.png",
+            allowed_hosts=set(),
+        )
+    assert (
+        fetch_validated_product_image(
+            "https://cdn.example.com/item.png",
+            allowed_hosts=set(),
+            resolver=lambda h, p, type=0: [_addrinfo_v4("93.184.216.34", p)],
+            session_factory=lambda h, ips: _FakeSession(
+                lambda u, **kw: _FakeStreamResponse(
+                    status_code=200,
+                    headers={"Content-Type": "image/png"},
+                    chunks=[SAMPLE_PNG],
+                )
+            ),
+        )
+        is None
+    )
+
+    # Delimiter-only or malformed GEN_AI_ALLOWED_IMAGE_HOSTS values must fail fast with ValueError.
+    for bad_hosts_env in (
+        ",",
+        " , , ",
+        " . ",
+        "cdn.example.com, . ",
+        "https://cdn.example.com",
+        "cdn.example.com:443",
+        "bad..example.com",
+        "bad host.example.com",
+    ):
+        monkeypatch.setenv("GEN_AI_ALLOWED_IMAGE_HOSTS", bad_hosts_env)
+        with pytest.raises(ValueError) as exc_url:
+            validate_and_normalize_image_url("https://cdn.example.com/item.png")
+        assert not isinstance(exc_url.value, ImageValidationError)
+
+        with pytest.raises(ValueError) as exc_fetch:
+            fetch_validated_product_image("https://cdn.example.com/item.png")
+        assert not isinstance(exc_fetch.value, ImageValidationError)
+
+    monkeypatch.delenv("GEN_AI_ALLOWED_IMAGE_HOSTS", raising=False)
+
+    # Malformed entries in explicit allowed_hosts also raise ValueError up front.
+    for bad_explicit in ({" . "}, {"https://cdn.example.com"}, {""}):
+        with pytest.raises(ValueError) as exc_exp:
+            fetch_validated_product_image(
+                "https://cdn.example.com/item.png",
+                allowed_hosts=bad_explicit,
+            )
+        assert not isinstance(exc_exp.value, ImageValidationError)
 
 
 @pytest.mark.parametrize(

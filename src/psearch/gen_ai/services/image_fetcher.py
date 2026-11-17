@@ -194,22 +194,73 @@ def _normalize_host_entry(raw_host: str) -> str:
     return raw_host.strip().lower().rstrip(".")
 
 
-def _normalize_host_set(hosts: Iterable[str]) -> set[str]:
+def _parse_and_validate_allowlist_entry(raw_entry: Any, source_label: str) -> str:
+    if not isinstance(raw_entry, str):
+        raise ValueError(f"{source_label} entries must be strings")
+    trimmed = raw_entry.strip()
+    if not trimmed or not trimmed.isascii() or _has_forbidden_url_chars(trimmed):
+        raise ValueError(f"Invalid hostname entry in {source_label}: {raw_entry!r}")
+    if trimmed.startswith("[") and trimmed.endswith("]"):
+        trimmed = trimmed[1:-1]
+    if (
+        not trimmed
+        or "%" in trimmed
+        or "/" in trimmed
+        or "?" in trimmed
+        or "#" in trimmed
+        or "@" in trimmed
+        or trimmed.startswith(".")
+        or trimmed.endswith("..")
+    ):
+        raise ValueError(f"Invalid hostname entry in {source_label}: {raw_entry!r}")
+
+    cleaned = trimmed.lower()
+    if cleaned.endswith("."):
+        cleaned = cleaned[:-1]
+    if not cleaned or ".." in cleaned:
+        raise ValueError(f"Invalid hostname entry in {source_label}: {raw_entry!r}")
+
+    try:
+        parsed_ip = ipaddress.ip_address(cleaned)
+    except ValueError:
+        parsed_ip = None
+
+    if parsed_ip is not None:
+        return str(parsed_ip)
+
+    if len(cleaned) > 253:
+        raise ValueError(f"Hostname entry in {source_label} exceeds 253 characters")
+    labels = cleaned.split(".")
+    if any(not _DNS_LABEL_RE.fullmatch(label) for label in labels) or labels[-1].isdigit():
+        raise ValueError(f"Invalid hostname entry in {source_label}: {raw_entry!r}")
+    return cleaned
+
+
+def _normalize_explicit_allowed_hosts(hosts: Iterable[str]) -> set[str]:
+    if isinstance(hosts, (str, bytes)) or not isinstance(hosts, Iterable):
+        raise ValueError("allowed_hosts must be a collection of hostname strings")
     normalized: set[str] = set()
     for item in hosts:
-        if not isinstance(item, str):
-            continue
-        cleaned = _normalize_host_entry(item)
-        if cleaned:
-            normalized.add(cleaned)
+        normalized.add(_parse_and_validate_allowlist_entry(item, "allowed_hosts"))
     return normalized
 
 
-def _get_allowed_image_hosts() -> set[str]:
-    raw = os.environ.get("GEN_AI_ALLOWED_IMAGE_HOSTS", "")
-    if not raw or not raw.strip():
-        return set()
-    return _normalize_host_set(raw.split(","))
+def _get_allowed_image_hosts() -> Optional[set[str]]:
+    raw = os.environ.get("GEN_AI_ALLOWED_IMAGE_HOSTS")
+    if raw is None or not raw.strip():
+        return None
+    normalized: set[str] = set()
+    for part in raw.split(","):
+        if not part.strip():
+            continue
+        normalized.add(
+            _parse_and_validate_allowlist_entry(part, "GEN_AI_ALLOWED_IMAGE_HOSTS")
+        )
+    if not normalized:
+        raise ValueError(
+            "GEN_AI_ALLOWED_IMAGE_HOSTS must contain at least one valid hostname when set"
+        )
+    return normalized
 
 
 def max_base64_chars_for_bytes(max_bytes: int) -> int:
@@ -272,7 +323,7 @@ def detect_raster_mime_type(data: bytes) -> Optional[str]:
 def _has_forbidden_url_chars(value: str) -> bool:
     for ch in value:
         code = ord(ch)
-        if ch.isspace() or code < 0x20 or code == 0x7F or ch == "\\":
+        if ch.isspace() or code < 0x20 or 0x7F <= code <= 0x9F or ch == "\\":
             return True
     return False
 
@@ -339,6 +390,12 @@ def validate_and_normalize_image_url(
     allowed_hosts: Optional[set[str]] = None,
 ) -> Tuple[str, str]:
     """Validate an ``https://`` or ``gs://`` URL and return ``(normalized_https_url, hostname)``."""
+    effective_allowed_hosts: Optional[set[str]] = (
+        _get_allowed_image_hosts()
+        if allowed_hosts is None
+        else _normalize_explicit_allowed_hosts(allowed_hosts)
+    )
+
     if not isinstance(image_url, str) or not image_url:
         raise ImageValidationError("Image URL must be a non-empty string")
     if len(image_url) > MAX_IMAGE_URL_CHARS:
@@ -351,12 +408,6 @@ def validate_and_normalize_image_url(
         )
     if "#" in image_url:
         raise ImageValidationError("URL fragments are not allowed in image URLs")
-
-    effective_allowed_hosts = (
-        _get_allowed_image_hosts()
-        if allowed_hosts is None
-        else _normalize_host_set(allowed_hosts)
-    )
 
     lower_prefix = image_url[:8].lower()
     if lower_prefix.startswith("gs://"):
@@ -418,7 +469,10 @@ def validate_and_normalize_image_url(
     else:
         raise ImageValidationError("Only https:// and gs:// image URLs are allowed")
 
-    if effective_allowed_hosts and normalized_host not in effective_allowed_hosts:
+    if (
+        effective_allowed_hosts is not None
+        and normalized_host not in effective_allowed_hosts
+    ):
         raise ImageValidationError(
             f"Host '{normalized_host}' is not in GEN_AI_ALLOWED_IMAGE_HOSTS"
         )
@@ -743,10 +797,10 @@ def fetch_validated_product_image(
         if max_redirects is None
         else _validate_max_redirects("max_redirects", max_redirects)
     )
-    effective_allowed_hosts = (
+    effective_allowed_hosts: Optional[set[str]] = (
         _get_allowed_image_hosts()
         if allowed_hosts is None
-        else _normalize_host_set(allowed_hosts)
+        else _normalize_explicit_allowed_hosts(allowed_hosts)
     )
 
     timeout_tuple = (
