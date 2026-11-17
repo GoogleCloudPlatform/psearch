@@ -156,16 +156,19 @@ module "ui" {
 }
 
 module "gen_ai" {
-  source                    = "./modules/gen_ai"
-  project_id                = var.project_id
-  region                    = var.region
-  service_account_email     = module.iam.gen_ai_service_account_email
-  invoker_members           = var.gen_ai_invoker_members
-  ingress                   = var.gen_ai_ingress
-  gen_ai_auth_audience      = var.gen_ai_auth_audience
-  gen_ai_allowed_principals = var.gen_ai_allowed_principals
-  gen_ai_allowed_domains    = var.gen_ai_allowed_domains
-  allowed_origins           = var.gen_ai_allowed_origins
+  source                         = "./modules/gen_ai"
+  project_id                     = var.project_id
+  region                         = var.region
+  service_account_email          = module.iam.gen_ai_service_account_email
+  invoker_members                = var.gen_ai_invoker_members
+  ingress                        = var.gen_ai_ingress
+  gen_ai_auth_audience           = var.gen_ai_auth_audience
+  gen_ai_allowed_principals      = var.gen_ai_allowed_principals
+  gen_ai_allowed_domains         = var.gen_ai_allowed_domains
+  allowed_origins                = var.gen_ai_allowed_origins
+  rate_limit_per_minute          = var.gen_ai_rate_limit_per_minute
+  sql_task_rate_limit_per_minute = var.gen_ai_sql_task_rate_limit_per_minute
+  max_concurrent_sql_tasks       = var.gen_ai_max_concurrent_sql_tasks
 
   depends_on = [
     time_sleep.wait_for_iam

@@ -132,6 +132,39 @@ variable "gen_ai_allowed_origins" {
   default     = ""
 }
 
+variable "gen_ai_rate_limit_per_minute" {
+  description = "Per-principal sliding-window rate limit per minute for paid Gen AI / BigQuery endpoints"
+  type        = number
+  default     = 60
+
+  validation {
+    condition     = var.gen_ai_rate_limit_per_minute > 0
+    error_message = "gen_ai_rate_limit_per_minute must be greater than 0."
+  }
+}
+
+variable "gen_ai_sql_task_rate_limit_per_minute" {
+  description = "Per-principal sliding-window rate limit per minute for POST /generate-sql"
+  type        = number
+  default     = 10
+
+  validation {
+    condition     = var.gen_ai_sql_task_rate_limit_per_minute > 0
+    error_message = "gen_ai_sql_task_rate_limit_per_minute must be greater than 0."
+  }
+}
+
+variable "gen_ai_max_concurrent_sql_tasks" {
+  description = "Maximum concurrent background SQL generation tasks per gen-ai-service instance"
+  type        = number
+  default     = 3
+
+  validation {
+    condition     = var.gen_ai_max_concurrent_sql_tasks > 0
+    error_message = "gen_ai_max_concurrent_sql_tasks must be greater than 0."
+  }
+}
+
 variable "search_api_invoker_members" {
   description = "Explicit IAM principals granted roles/run.invoker on product-search-api (defaults to none)"
   type        = list(string)

@@ -103,3 +103,36 @@ variable "allowed_origins" {
   type        = string
   default     = ""
 }
+
+variable "rate_limit_per_minute" {
+  description = "Per-principal sliding-window rate limit per minute for paid Gen AI / BigQuery endpoints"
+  type        = number
+  default     = 60
+
+  validation {
+    condition     = var.rate_limit_per_minute > 0
+    error_message = "rate_limit_per_minute must be greater than 0."
+  }
+}
+
+variable "sql_task_rate_limit_per_minute" {
+  description = "Per-principal sliding-window rate limit per minute for POST /generate-sql"
+  type        = number
+  default     = 10
+
+  validation {
+    condition     = var.sql_task_rate_limit_per_minute > 0
+    error_message = "sql_task_rate_limit_per_minute must be greater than 0."
+  }
+}
+
+variable "max_concurrent_sql_tasks" {
+  description = "Maximum concurrent background SQL generation tasks per Cloud Run instance"
+  type        = number
+  default     = 3
+
+  validation {
+    condition     = var.max_concurrent_sql_tasks > 0
+    error_message = "max_concurrent_sql_tasks must be greater than 0."
+  }
+}

@@ -17,13 +17,22 @@
 Task management module for handling background tasks and their statuses.
 """
 
-# This makes the functions from task_manager directly available under tasks.func_name
-from .task_manager import init_task, update_task_status, get_task_status, add_task_log, get_all_tasks_summary
+from .task_manager import (
+    MAX_STORED_TASKS,
+    add_task_log,
+    clear_tasks,
+    get_all_tasks_summary,
+    get_task_status,
+    init_task,
+    update_task_status,
+)
 
 __all__ = [
+    "MAX_STORED_TASKS",
     "init_task",
     "update_task_status",
     "get_task_status",
     "add_task_log",
-    "get_all_tasks_summary" # Added for potential admin/debug view
+    "get_all_tasks_summary",
+    "clear_tasks",
 ]

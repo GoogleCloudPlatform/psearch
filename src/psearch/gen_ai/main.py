@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import inspect
 import json
 import logging
 import os
@@ -34,6 +35,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
 from .auth import require_auth
+from .rate_limit import (
+    enforce_paid_inference_rate_limit,
+    enforce_sql_task_rate_limit,
+    enforce_status_poll_rate_limit,
+    reset_limiters,
+    sql_task_concurrency_limiter,
+)
 from .services.conversational_search_service import ConversationalSearchService
 from .services.enrichment_service import EnrichmentService
 from .services.imagen_service import ImageGenerationService
@@ -604,7 +612,11 @@ async def health_check() -> Dict[str, str]:
     return {"status": "healthy"}
 
 
-@protected_router.post("/conversational-search", tags=["Search"])
+@protected_router.post(
+    "/conversational-search",
+    tags=["Search"],
+    dependencies=[Depends(enforce_paid_inference_rate_limit)],
+)
 async def conversational_search(
     request: ConversationalSearchRequest,
     conversational_search_service: ConversationalSearchService = Depends(
@@ -655,7 +667,11 @@ async def conversational_search(
         )
 
 
-@protected_router.post("/enrichment", tags=["Enrichment"])
+@protected_router.post(
+    "/enrichment",
+    tags=["Enrichment"],
+    dependencies=[Depends(enforce_paid_inference_rate_limit)],
+)
 async def enrichment(
     request: EnrichmentRequest,
     enrichment_service: EnrichmentService = Depends(get_enrichment_service),
@@ -709,7 +725,11 @@ async def enrichment(
         )
 
 
-@protected_router.post("/marketing", tags=["Marketing"])
+@protected_router.post(
+    "/marketing",
+    tags=["Marketing"],
+    dependencies=[Depends(enforce_paid_inference_rate_limit)],
+)
 async def marketing(
     request: MarketingRequest,
     marketing_service: MarketingService = Depends(get_marketing_service),
@@ -770,7 +790,11 @@ async def marketing(
         )
 
 
-@protected_router.post("/generate-enhanced-image", tags=["Images"])
+@protected_router.post(
+    "/generate-enhanced-image",
+    tags=["Images"],
+    dependencies=[Depends(enforce_paid_inference_rate_limit)],
+)
 async def generate_enhanced_image(
     request: EnhancedImageRequest,
     image_generation_service: ImageGenerationService = Depends(
@@ -830,11 +854,15 @@ async def generate_enhanced_image(
     summary="Generate SQL transformation script",
     description="Initiates a background task to generate a SQL transformation script.",
     response_model=Dict[str, str],
+    dependencies=[
+        Depends(enforce_paid_inference_rate_limit),
+        Depends(enforce_sql_task_rate_limit),
+    ],
 )
 async def generate_sql_task(
+    http_request: Request,
     request: SQLGenerationRequest,
     background_tasks: BackgroundTasks,
-    pipeline: TransformationPipeline = Depends(get_transformation_pipeline),
 ):
     """Initiates a SQL transformation script generation task."""
     logger.info(
@@ -842,8 +870,19 @@ async def generate_sql_task(
         f"{request.source_table} -> {request.destination_table}"
     )
 
+    sql_task_concurrency_limiter.acquire_or_reject()
+    slot_transferred = False
     task_id: Optional[str] = None
     try:
+        pipeline_provider = http_request.app.dependency_overrides.get(
+            get_transformation_pipeline, get_transformation_pipeline
+        )
+        pipeline = (
+            await pipeline_provider()
+            if inspect.iscoroutinefunction(pipeline_provider)
+            else pipeline_provider()
+        )
+
         schema_to_use = (
             request.destination_schema or SchemaLoader.get_destination_schema()
         )
@@ -865,7 +904,13 @@ async def generate_sql_task(
             task_id, task_type="sql_generation", input_details=input_details
         )
 
+        runner = (
+            sql_task_concurrency_limiter.run_guarded_async
+            if inspect.iscoroutinefunction(pipeline.execute_pipeline)
+            else sql_task_concurrency_limiter.run_guarded
+        )
         background_tasks.add_task(
+            runner,
             pipeline.execute_pipeline,
             task_id=task_id,
             source_table_name=request.source_table,
@@ -875,6 +920,7 @@ async def generate_sql_task(
             source_data_sample_json=request.source_data_sample_json,
             critical_fields_for_semantic_refinement=request.critical_fields_to_refine,
         )
+        slot_transferred = True
 
         return {
             "task_id": task_id,
@@ -905,6 +951,9 @@ async def generate_sql_task(
             status_code=500,
             detail="Internal server error while initiating SQL generation task",
         )
+    finally:
+        if not slot_transferred:
+            sql_task_concurrency_limiter.release()
 
 
 @protected_router.get(
@@ -912,6 +961,7 @@ async def generate_sql_task(
     tags=["SQL"],
     summary="Get SQL generation task status",
     response_model=Optional[Dict[str, Any]],
+    dependencies=[Depends(enforce_status_poll_rate_limit)],
 )
 async def get_sql_task_status(task_id: str):
     """Retrieves the status, logs, and result of a SQL generation task."""
@@ -940,6 +990,7 @@ async def get_sql_task_status(task_id: str):
     "/sql/tasks-summary",
     tags=["SQL"],
     summary="Get summary of all SQL generation tasks",
+    dependencies=[Depends(enforce_status_poll_rate_limit)],
 )
 async def get_all_sql_tasks_summary():
     """Retrieves a summary list of all tasks managed by the task manager."""
@@ -965,6 +1016,7 @@ async def get_all_sql_tasks_summary():
         "script and its error message."
     ),
     response_model=Dict[str, Optional[str]],
+    dependencies=[Depends(enforce_paid_inference_rate_limit)],
 )
 async def simple_sql_fix(
     request: SQLSimpleFixRequest,
@@ -1005,6 +1057,7 @@ async def simple_sql_fix(
     summary="Validate SQL script",
     description="Performs a dry run validation of a SQL script without executing it",
     response_model=Dict[str, Any],
+    dependencies=[Depends(enforce_paid_inference_rate_limit)],
 )
 async def validate_sql(
     request: SQLValidationRequest,
@@ -1036,6 +1089,7 @@ async def validate_sql(
     summary="Generate SQL fix",
     description="Generates a fixed SQL script using AI based on error message",
     response_model=SQLFixResponse,
+    dependencies=[Depends(enforce_paid_inference_rate_limit)],
 )
 async def fix_sql(
     request: SQLFixRequest,
@@ -1085,6 +1139,7 @@ async def fix_sql(
     summary="Analyze SQL differences",
     description="Analyzes and explains differences between original and fixed SQL",
     response_model=Dict[str, Any],
+    dependencies=[Depends(enforce_paid_inference_rate_limit)],
 )
 async def analyze_sql_diff(
     original_sql: str = Body(
@@ -1134,6 +1189,7 @@ async def analyze_sql_diff(
 
 def create_app() -> FastAPI:
     """Create and configure the Gen AI FastAPI application instance."""
+    reset_limiters()
     application = FastAPI(
         title="Gen AI Service",
         description=(

@@ -354,6 +354,18 @@ def test_no_cloud_run_module_allows_all_users_and_all_enforce_ingress():
     )
     assert gen_ai_envs["GEN_AI_ALLOWED_DOMAINS"] == "${var.gen_ai_allowed_domains}"
     assert gen_ai_envs["ALLOWED_ORIGINS"] == "${var.allowed_origins}"
+    assert (
+        gen_ai_envs["GEN_AI_RATE_LIMIT_PER_MINUTE"]
+        == "${tostring(var.rate_limit_per_minute)}"
+    )
+    assert (
+        gen_ai_envs["GEN_AI_SQL_TASK_RATE_LIMIT_PER_MINUTE"]
+        == "${tostring(var.sql_task_rate_limit_per_minute)}"
+    )
+    assert (
+        gen_ai_envs["GEN_AI_MAX_CONCURRENT_SQL_TASKS"]
+        == "${tostring(var.max_concurrent_sql_tasks)}"
+    )
 
     gen_ai_vars = {
         k: v
@@ -369,6 +381,16 @@ def test_no_cloud_run_module_allows_all_users_and_all_enforce_ingress():
         "allowed_origins",
     ):
         assert gen_ai_vars[var_name]["default"] == ""
+    expected_gen_ai_limits = {
+        "rate_limit_per_minute": 60,
+        "sql_task_rate_limit_per_minute": 10,
+        "max_concurrent_sql_tasks": 3,
+    }
+    for var_name, expected_default in expected_gen_ai_limits.items():
+        assert gen_ai_vars[var_name]["default"] == expected_default
+        validations = gen_ai_vars[var_name].get("validation", [])
+        assert len(validations) >= 1
+        assert "> 0" in validations[0]["condition"]
 
     # Verify search_api runtime auth/CORS env blocks & module variables
     search_api_main = _load_tf(IAC_ROOT / "modules" / "search_api" / "main.tf")
@@ -479,6 +501,29 @@ def test_no_cloud_run_module_allows_all_users_and_all_enforce_ingress():
         == "${var.gen_ai_allowed_domains}"
     )
     assert root_modules["gen_ai"]["allowed_origins"] == "${var.gen_ai_allowed_origins}"
+    assert root_vars["gen_ai_rate_limit_per_minute"]["default"] == 60
+    assert root_vars["gen_ai_sql_task_rate_limit_per_minute"]["default"] == 10
+    assert root_vars["gen_ai_max_concurrent_sql_tasks"]["default"] == 3
+    for root_limit_var in (
+        "gen_ai_rate_limit_per_minute",
+        "gen_ai_sql_task_rate_limit_per_minute",
+        "gen_ai_max_concurrent_sql_tasks",
+    ):
+        validations = root_vars[root_limit_var].get("validation", [])
+        assert len(validations) >= 1
+        assert "> 0" in validations[0]["condition"]
+    assert (
+        root_modules["gen_ai"]["rate_limit_per_minute"]
+        == "${var.gen_ai_rate_limit_per_minute}"
+    )
+    assert (
+        root_modules["gen_ai"]["sql_task_rate_limit_per_minute"]
+        == "${var.gen_ai_sql_task_rate_limit_per_minute}"
+    )
+    assert (
+        root_modules["gen_ai"]["max_concurrent_sql_tasks"]
+        == "${var.gen_ai_max_concurrent_sql_tasks}"
+    )
 
     assert (
         root_modules["search_api"]["invoker_members"]

@@ -107,6 +107,18 @@ resource "google_cloud_run_v2_service" "gen_ai_service" {
         name  = "ALLOWED_ORIGINS"
         value = var.allowed_origins
       }
+      env {
+        name  = "GEN_AI_RATE_LIMIT_PER_MINUTE"
+        value = tostring(var.rate_limit_per_minute)
+      }
+      env {
+        name  = "GEN_AI_SQL_TASK_RATE_LIMIT_PER_MINUTE"
+        value = tostring(var.sql_task_rate_limit_per_minute)
+      }
+      env {
+        name  = "GEN_AI_MAX_CONCURRENT_SQL_TASKS"
+        value = tostring(var.max_concurrent_sql_tasks)
+      }
 
       resources {
         limits = {
