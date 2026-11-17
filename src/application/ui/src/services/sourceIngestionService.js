@@ -21,6 +21,39 @@ import * as genAiService from './genAiService';
 // Base URL for the Source Ingestion API - direct to the port since we're running the backend directly
 const INGESTION_SOURCE_URL = config.ingestionSourceUrl;
 
+const readLocalStorageItem = (key) => {
+  try {
+    if (
+      typeof localStorage !== 'undefined' &&
+      localStorage !== null &&
+      typeof localStorage.getItem === 'function'
+    ) {
+      return localStorage.getItem(key);
+    }
+  } catch (_err) {
+    // Ignore storage access errors in restricted/non-browser environments
+  }
+  return null;
+};
+
+export const getAuthHeaders = () => {
+  const headers = {};
+  const bearerToken = (readLocalStorageItem('ingestionAuthToken') || '').trim();
+  const adminToken = (
+    readLocalStorageItem('ingestionAdminToken') ||
+    process.env.REACT_APP_INGESTION_ADMIN_TOKEN ||
+    ''
+  ).trim();
+
+  if (bearerToken) {
+    headers['Authorization'] = `Bearer ${bearerToken}`;
+  }
+  if (adminToken) {
+    headers['X-Admin-Token'] = adminToken;
+  }
+  return headers;
+};
+
 // Storage for mock job statuses
 const mockJobStatuses = {};
 
@@ -214,6 +247,8 @@ const mockService = {
 
 // Main service that delegates to real or mock based on mode
 export const sourceIngestionService = {
+  getAuthHeaders,
+
   // Get project bucket name (for display purposes)
   getProjectBucketName: (projectId) => {
     return `${projectId}_psearch_raw`;
@@ -240,6 +275,7 @@ export const sourceIngestionService = {
 
     const response = await axios.post(`${INGESTION_SOURCE_URL}/upload`, formData, {
       headers: {
+        ...getAuthHeaders(),
         'Content-Type': 'multipart/form-data',
       },
       onUploadProgress: (progressEvent) => {
@@ -261,7 +297,11 @@ export const sourceIngestionService = {
       return mockService.listBuckets();
     }
 
-    const response = await axios.get(`${INGESTION_SOURCE_URL}/buckets`);
+    const response = await axios.get(`${INGESTION_SOURCE_URL}/buckets`, {
+      headers: {
+        ...getAuthHeaders(),
+      },
+    });
     return response.data;
   },
 
@@ -271,7 +311,11 @@ export const sourceIngestionService = {
       return mockService.createDataset(datasetRequest);
     }
 
-    const response = await axios.post(`${INGESTION_SOURCE_URL}/datasets`, datasetRequest);
+    const response = await axios.post(`${INGESTION_SOURCE_URL}/datasets`, datasetRequest, {
+      headers: {
+        ...getAuthHeaders(),
+      },
+    });
     return response.data;
   },
 
@@ -281,7 +325,11 @@ export const sourceIngestionService = {
       return mockService.createTable(tableRequest);
     }
 
-    const response = await axios.post(`${INGESTION_SOURCE_URL}/tables`, tableRequest);
+    const response = await axios.post(`${INGESTION_SOURCE_URL}/tables`, tableRequest, {
+      headers: {
+        ...getAuthHeaders(),
+      },
+    });
     return response.data;
   },
 
@@ -294,8 +342,13 @@ export const sourceIngestionService = {
 
     // Add file_type to the query parameters
     const response = await axios.post(
-      `${INGESTION_SOURCE_URL}/create_and_load?file_id=${fileId}&file_type=${fileType}`,
-      loadRequest
+      `${INGESTION_SOURCE_URL}/create_and_load?file_id=${encodeURIComponent(fileId)}&file_type=${encodeURIComponent(fileType)}`,
+      loadRequest,
+      {
+        headers: {
+          ...getAuthHeaders(),
+        },
+      }
     );
     return response.data;
   },
@@ -309,8 +362,13 @@ export const sourceIngestionService = {
 
     // Add file_type to the query parameters
     const response = await axios.post(
-      `${INGESTION_SOURCE_URL}/load?file_id=${fileId}&file_type=${fileType}`,
-      loadRequest
+      `${INGESTION_SOURCE_URL}/load?file_id=${encodeURIComponent(fileId)}&file_type=${encodeURIComponent(fileType)}`,
+      loadRequest,
+      {
+        headers: {
+          ...getAuthHeaders(),
+        },
+      }
     );
     return response.data;
   },
@@ -321,7 +379,11 @@ export const sourceIngestionService = {
       return mockService.getJobStatus(jobId);
     }
 
-    const response = await axios.get(`${INGESTION_SOURCE_URL}/jobs/${jobId}`);
+    const response = await axios.get(`${INGESTION_SOURCE_URL}/jobs/${encodeURIComponent(jobId)}`, {
+      headers: {
+        ...getAuthHeaders(),
+      },
+    });
     return response.data;
   },
 
@@ -346,6 +408,10 @@ export const sourceIngestionService = {
       const response = await axios.post(`${INGESTION_SOURCE_URL}/ensure-dataset`, {
         dataset_id: datasetId,
         location: "US"
+      }, {
+        headers: {
+          ...getAuthHeaders(),
+        },
       });
       
       console.log("Dataset ensure response:", response.data);
@@ -558,7 +624,10 @@ export const sourceIngestionService = {
         sql_script: sqlScript,
         max_timeout_seconds: 30  // 30 second timeout for dry run
       }, { 
-        timeout: 35000 // Slightly longer axios timeout than the server-side timeout
+        timeout: 35000, // Slightly longer axios timeout than the server-side timeout
+        headers: {
+          ...getAuthHeaders(),
+        },
       });
 
       console.log("Dry run response:", response.data);

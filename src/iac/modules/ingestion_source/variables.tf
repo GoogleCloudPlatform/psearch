@@ -57,3 +57,44 @@ variable "timeout_seconds" {
   type        = number
   default     = 300 # 5 minutes timeout
 }
+
+variable "invoker_members" {
+  description = "Explicit IAM principals granted roles/run.invoker on ingestion-source-service (defaults to none)"
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = !contains(var.invoker_members, "allUsers") && !contains(var.invoker_members, "allAuthenticatedUsers")
+    error_message = "Public principals (allUsers, allAuthenticatedUsers) are not permitted on ingestion-source-service."
+  }
+}
+
+variable "ingestion_auth_audience" {
+  description = "Expected OIDC token audience for ingestion-source-service Bearer authentication"
+  type        = string
+  default     = ""
+}
+
+variable "ingestion_allowed_principals" {
+  description = "Comma-separated allowlist of authenticated email principals allowed to call ingestion-source-service"
+  type        = string
+  default     = ""
+}
+
+variable "ingestion_allowed_domains" {
+  description = "Comma-separated allowlist of Google Workspace domains allowed to call ingestion-source-service"
+  type        = string
+  default     = ""
+}
+
+variable "allowed_origins" {
+  description = "Comma-separated CORS allowed origins for ingestion-source-service"
+  type        = string
+  default     = ""
+}
+
+variable "max_upload_size_bytes" {
+  description = "Maximum allowed upload payload size in bytes (defaults to 50 MiB)"
+  type        = number
+  default     = 52428800
+}

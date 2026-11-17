@@ -394,7 +394,7 @@ const SourceIngestion = () => {
         dataset_id: datasetId,
         table_id: tableId,
         source_format: uploadResult.file_type.toUpperCase(),
-        write_disposition: "WRITE_TRUNCATE",
+        write_disposition: "WRITE_EMPTY",
         skip_leading_rows: uploadResult.file_type === 'csv' ? 1 : 0, // Use 0 for JSON files
         allow_jagged_rows: uploadResult.file_type === 'csv', // Only relevant for CSV
         allow_quoted_newlines: uploadResult.file_type === 'csv', // Only relevant for CSV
@@ -1220,7 +1220,7 @@ const SourceIngestion = () => {
                     
                     <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>Write Disposition:</Typography>
                     <Typography variant="body1" gutterBottom>
-                      WRITE_TRUNCATE (Replace existing data)
+                      WRITE_EMPTY (Fail if destination table is not empty)
                     </Typography>
                     
                     {uploadResult?.file_type === 'json' && (

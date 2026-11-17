@@ -33,3 +33,44 @@ variable "dimensions" {
   type        = number
   default     = 768
 }
+
+variable "ingestion_source_invoker_members" {
+  description = "Explicit IAM principals granted roles/run.invoker on ingestion-source-service (defaults to none)"
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = !contains(var.ingestion_source_invoker_members, "allUsers") && !contains(var.ingestion_source_invoker_members, "allAuthenticatedUsers")
+    error_message = "Public principals (allUsers, allAuthenticatedUsers) are not permitted on ingestion-source-service."
+  }
+}
+
+variable "ingestion_auth_audience" {
+  description = "Expected OIDC token audience for ingestion-source-service Bearer authentication"
+  type        = string
+  default     = ""
+}
+
+variable "ingestion_allowed_principals" {
+  description = "Comma-separated allowlist of authenticated email principals allowed to call ingestion-source-service"
+  type        = string
+  default     = ""
+}
+
+variable "ingestion_allowed_domains" {
+  description = "Comma-separated allowlist of Google Workspace domains allowed to call ingestion-source-service"
+  type        = string
+  default     = ""
+}
+
+variable "ingestion_allowed_origins" {
+  description = "Comma-separated CORS allowed origins for ingestion-source-service"
+  type        = string
+  default     = ""
+}
+
+variable "ingestion_max_upload_size_bytes" {
+  description = "Maximum allowed upload payload size in bytes for ingestion-source-service (defaults to 50 MiB)"
+  type        = number
+  default     = 52428800
+}
