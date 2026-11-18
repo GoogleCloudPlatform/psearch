@@ -1618,12 +1618,17 @@ def test_enrichment_and_marketing_services_block_ssrf_and_attach_validated_raste
         "https://evil.example.com/secret.jpg",
         "https://json.example.com/secret.jpg",
         "https://spoof.example.com/secret.png",
+        "https://[::1/a.png",
+        "https://example.com]/a.png",
+        "https://[not_ipv6]/a.png",
     ]
     for bad_url in blocked_urls:
         enrichment_captured_contents.clear()
         marketing_captured_contents.clear()
 
+        assert enrichment_svc._fetch_product_image(bad_url) is None
         assert enrichment_svc._get_image_bytes_from_url(bad_url) is None
+        assert marketing_svc._fetch_product_image(bad_url) is None
         assert marketing_svc._get_image_bytes_from_url(bad_url) is None
 
         enrich_res = enrichment_svc.process_enrichment(

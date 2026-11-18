@@ -23,7 +23,8 @@ import ssl
 import subprocess
 import sys
 import threading
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+import time
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 import urllib3.connection
 import urllib3.util.connection
 
@@ -38,6 +39,7 @@ try:
         ImageTooLargeError,
         ImageValidationError,
         MAX_IMAGE_URL_CHARS,
+        MAX_PINNED_CONNECT_IPS,
         STREAM_CHUNK_BYTES,
         decode_bounded_base64_image,
         detect_raster_mime_type,
@@ -62,6 +64,7 @@ except ModuleNotFoundError as exc:
         ImageTooLargeError,
         ImageValidationError,
         MAX_IMAGE_URL_CHARS,
+        MAX_PINNED_CONNECT_IPS,
         STREAM_CHUNK_BYTES,
         decode_bounded_base64_image,
         detect_raster_mime_type,
@@ -167,6 +170,7 @@ class _FakeSession:
 def test_public_constants_and_exception_hierarchy() -> None:
     assert DEFAULT_MAX_IMAGE_BYTES == 10 * 1024 * 1024
     assert MAX_IMAGE_URL_CHARS == 2048
+    assert MAX_PINNED_CONNECT_IPS == 4
     assert STREAM_CHUNK_BYTES == 65536
     assert isinstance(ALLOWED_IMAGE_CONTENT_TYPES, frozenset)
     assert ALLOWED_IMAGE_CONTENT_TYPES == frozenset(
@@ -295,11 +299,93 @@ def test_validate_and_normalize_image_url_accepts_valid_https_and_gs(
         "https://127.1/a.png",
         "https://2130706433/a.png",
         "https://0177.0.0.1/a.png",
+        # Malformed bracketed IPv6 / authority URLs (must raise ImageValidationError, not raw ValueError)
+        "https://[::1/a.png",
+        "https://example.com]/a.png",
+        "https://cdn.example.com]/a.png",
+        "https://[not_ipv6]/a.png",
+        "https://[]/a.png",
     ],
 )
 def test_validate_and_normalize_image_url_rejects_disallowed_urls(bad_url: str) -> None:
     with pytest.raises(ImageValidationError):
         validate_and_normalize_image_url(bad_url)
+
+
+def test_malformed_bracketed_urls_and_redirects_fail_closed_without_uncaught_value_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    malformed_urls = (
+        "https://[::1/a.png",
+        "https://example.com]/a.png",
+        "https://cdn.example.com]/a.png",
+        "https://[not_ipv6]/a.png",
+        "https://[]/a.png",
+    )
+    for bad_url in malformed_urls:
+        with pytest.raises(ImageValidationError, match="Invalid HTTPS image URL"):
+            validate_and_normalize_image_url(bad_url)
+        assert fetch_validated_product_image(bad_url) is None
+
+    monkeypatch.setenv("GEN_AI_MAX_IMAGE_REDIRECTS", "2")
+    for bad_location in (
+        "//[::1/a.png",
+        "https://[::1/a.png",
+        "//example.com]/a.png",
+        "//[not_ipv6]/a.png",
+    ):
+        created_sessions: List[_FakeSession] = []
+        created_responses: List[_FakeStreamResponse] = []
+
+        def _factory_bad_loc(
+            host: str,
+            ips: List[str],
+            loc: str = bad_location,
+            sessions_out: List[_FakeSession] = created_sessions,
+            responses_out: List[_FakeStreamResponse] = created_responses,
+        ) -> _FakeSession:
+            def _handle(url: str, **kw: Any) -> _FakeStreamResponse:
+                resp = _FakeStreamResponse(
+                    status_code=302,
+                    headers={"Location": loc},
+                )
+                responses_out.append(resp)
+                return resp
+
+            sess = _FakeSession(_handle)
+            sessions_out.append(sess)
+            return sess
+
+        assert (
+            fetch_validated_product_image(
+                "https://cdn1.example.com/start.png",
+                resolver=lambda h, p, type=0: [_addrinfo_v4("93.184.216.34", p)],
+                session_factory=_factory_bad_loc,
+            )
+            is None
+        )
+        assert len(created_sessions) == 1
+        assert created_sessions[0].closed is True
+        assert len(created_responses) == 1
+        assert created_responses[0].closed is True
+
+    adapter = image_fetcher._PinnedIPHTTPSAdapter(
+        hostname="cdn.example.com",
+        pinned_ips=["93.184.216.34"],
+    )
+    try:
+        for bad_req_url in (
+            "https://[::1/a.png",
+            "https://example.com]/a.png",
+            "https://[not_ipv6]/a.png",
+            "https://cdn.example.com:abc/a.png",
+        ):
+            prepared = requests.PreparedRequest()
+            prepared.url = bad_req_url
+            with pytest.raises(requests.exceptions.InvalidURL):
+                adapter.send(prepared)
+    finally:
+        adapter.close()
 
 
 def test_allowed_image_hosts_env_and_explicit_filtering(
@@ -938,41 +1024,244 @@ def test_env_var_validation_propagates_value_error_fast(
     monkeypatch.delenv("GEN_AI_IMAGE_FETCH_TIMEOUT_SECONDS")
 
     # Verify connect/read timeout tuple calculation: (min(5.0, timeout), timeout)
-    monkeypatch.setenv("GEN_AI_IMAGE_FETCH_TIMEOUT_SECONDS", "12.0")
-    recorded_sess = _FakeSession(
-        lambda url, **kw: _FakeStreamResponse(
-            status_code=200,
-            headers={"Content-Type": "image/png"},
-            chunks=[SAMPLE_PNG],
+    with monkeypatch.context() as mp:
+        mp.setattr(time, "monotonic", lambda: 1000.0)
+        mp.setenv("GEN_AI_IMAGE_FETCH_TIMEOUT_SECONDS", "12.0")
+        recorded_sess = _FakeSession(
+            lambda url, **kw: _FakeStreamResponse(
+                status_code=200,
+                headers={"Content-Type": "image/png"},
+                chunks=[SAMPLE_PNG],
+            )
         )
-    )
-    assert fetch_validated_product_image(
-        "https://cdn.example.com/a.png",
-        resolver=lambda h, p, type=0: [_addrinfo_v4("93.184.216.34", p)],
-        session_factory=lambda h, ips: recorded_sess,
-    ) == (SAMPLE_PNG, "image/png")
-    assert recorded_sess.calls[0]["timeout"] == (5.0, 12.0)
+        assert fetch_validated_product_image(
+            "https://cdn.example.com/a.png",
+            resolver=lambda h, p, type=0: [_addrinfo_v4("93.184.216.34", p)],
+            session_factory=lambda h, ips: recorded_sess,
+        ) == (SAMPLE_PNG, "image/png")
+        assert recorded_sess.calls[0]["timeout"] == (5.0, 12.0)
 
-    monkeypatch.setenv("GEN_AI_IMAGE_FETCH_TIMEOUT_SECONDS", "2.5")
-    short_sess = _FakeSession(
-        lambda url, **kw: _FakeStreamResponse(
-            status_code=200,
-            headers={"Content-Type": "image/png"},
-            chunks=[SAMPLE_PNG],
+        mp.setenv("GEN_AI_IMAGE_FETCH_TIMEOUT_SECONDS", "2.5")
+        short_sess = _FakeSession(
+            lambda url, **kw: _FakeStreamResponse(
+                status_code=200,
+                headers={"Content-Type": "image/png"},
+                chunks=[SAMPLE_PNG],
+            )
         )
-    )
-    assert fetch_validated_product_image(
-        "https://cdn.example.com/a.png",
-        resolver=lambda h, p, type=0: [_addrinfo_v4("93.184.216.34", p)],
-        session_factory=lambda h, ips: short_sess,
-    ) == (SAMPLE_PNG, "image/png")
-    assert short_sess.calls[0]["timeout"] == (2.5, 2.5)
-    monkeypatch.delenv("GEN_AI_IMAGE_FETCH_TIMEOUT_SECONDS")
+        assert fetch_validated_product_image(
+            "https://cdn.example.com/a.png",
+            resolver=lambda h, p, type=0: [_addrinfo_v4("93.184.216.34", p)],
+            session_factory=lambda h, ips: short_sess,
+        ) == (SAMPLE_PNG, "image/png")
+        assert short_sess.calls[0]["timeout"] == (2.5, 2.5)
 
     for bad_redirects in ("-1", "4", "99", "abc"):
         monkeypatch.setenv("GEN_AI_MAX_IMAGE_REDIRECTS", bad_redirects)
         with pytest.raises(ValueError):
             fetch_validated_product_image("https://cdn.example.com/a.png")
+
+
+def test_multi_ip_dns_validates_all_records_while_capping_connect_attempts_and_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert MAX_PINNED_CONNECT_IPS == 4
+
+    nine_global_ips = [f"93.184.216.{i}" for i in range(1, 10)]
+    ten_global_ips = [f"93.184.216.{i}" for i in range(1, 11)]
+
+    # 1. All 10 DNS records are still validated: a private/metadata 10th IP fails closed immediately.
+    for tenth_bad_ip in ("10.0.0.99", "169.254.169.254"):
+        mixed_ten_records = [_addrinfo_v4(ip, 443) for ip in nine_global_ips] + [
+            _addrinfo_v4(tenth_bad_ip, 443)
+        ]
+        with pytest.raises(ImageValidationError):
+            resolve_and_validate_host_ips(
+                "multi.example.com",
+                resolver=lambda h, p, type=0, recs=mixed_ten_records: recs,
+            )
+
+        def _unexpected_connect(*args: Any, **kwargs: Any) -> socket.socket:
+            raise AssertionError("create_connection must not run when 10th IP is private")
+
+        monkeypatch.setattr(
+            urllib3.util.connection, "create_connection", _unexpected_connect
+        )
+        assert (
+            fetch_validated_product_image(
+                "https://multi.example.com/item.png",
+                resolver=lambda h, p, type=0, recs=mixed_ten_records: recs,
+            )
+            is None
+        )
+
+    # 2. When all 10 DNS records are global, resolve_and_validate_host_ips returns all 10,
+    #    while _PinnedIPHTTPSConnection._new_conn attempts at most MAX_PINNED_CONNECT_IPS = 4.
+    all_ten_records = [_addrinfo_v4(ip, 443) for ip in ten_global_ips]
+    resolved = resolve_and_validate_host_ips(
+        "multi.example.com",
+        resolver=lambda h, p, type=0: all_ten_records,
+    )
+    assert resolved == ten_global_ips
+
+    clock = [100.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda host, port, *a, **kw: all_ten_records,
+    )
+
+    attempted_cap_calls: List[Tuple[Tuple[str, int], Any]] = []
+
+    def _timeout_each_connect(
+        address: Tuple[str, int],
+        timeout: Any = None,
+        source_address: Any = None,
+        socket_options: Any = None,
+    ) -> socket.socket:
+        attempted_cap_calls.append((address, timeout))
+        clock[0] += 1.0
+        raise socket.timeout("simulated connect timeout")
+
+    monkeypatch.setattr(
+        urllib3.util.connection, "create_connection", _timeout_each_connect
+    )
+    assert (
+        fetch_validated_product_image(
+            "https://multi.example.com/item.png",
+            timeout_seconds=60.0,
+        )
+        is None
+    )
+    assert [addr[0] for addr, _ in attempted_cap_calls] == ten_global_ips[:4]
+
+    # 3. Aggregate monotonic deadline bounds per-attempt connect timeout and stops further IPs.
+    clock[0] = 200.0
+    deadline_connect_calls: List[Tuple[Tuple[str, int], Any]] = []
+
+    def _timeout_advancing_to_deadline(
+        address: Tuple[str, int],
+        timeout: Any = None,
+        source_address: Any = None,
+        socket_options: Any = None,
+    ) -> socket.socket:
+        deadline_connect_calls.append((address, timeout))
+        clock[0] += float(timeout)
+        raise socket.timeout("simulated connect timeout consuming budget")
+
+    monkeypatch.setattr(
+        urllib3.util.connection, "create_connection", _timeout_advancing_to_deadline
+    )
+    assert (
+        fetch_validated_product_image(
+            "https://multi.example.com/item.png",
+            timeout_seconds=7.0,
+        )
+        is None
+    )
+    # Attempt 1 gets min(5.0, 7.0) == 5.0 -> clock=205.0; Attempt 2 gets min(5.0, 2.0) == 2.0 -> clock=207.0;
+    # Attempts 3 & 4 are skipped because remaining monotonic budget is 0.0.
+    assert deadline_connect_calls == [
+        (("93.184.216.1", 443), 5.0),
+        (("93.184.216.2", 443), 2.0),
+    ]
+
+
+def test_monotonic_deadline_aborts_slow_streaming_chunks_and_redirect_chains(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [500.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+
+    # 1. Multi-chunk streaming body exceeding monotonic deadline aborts immediately and closes response/session.
+    class _ClockAdvancingStreamResponse(_FakeStreamResponse):
+        def __init__(self, deltas: Sequence[float], chunks: Sequence[bytes]) -> None:
+            super().__init__(
+                status_code=200,
+                headers={"Content-Type": "image/png"},
+                chunks=chunks,
+            )
+            self._deltas = list(deltas)
+
+        def iter_content(self, chunk_size: int = 1) -> Iterable[bytes]:
+            self.iter_content_called = True
+            assert chunk_size == STREAM_CHUNK_BYTES
+            for delta, chunk in zip(self._deltas, self._chunks):
+                clock[0] += delta
+                self.chunks_yielded += 1
+                yield chunk
+
+    drip_resp = _ClockAdvancingStreamResponse(
+        deltas=[4.0, 6.5, 4.0],
+        chunks=[SAMPLE_PNG, b"a" * 32, b"b" * 32],
+    )
+    drip_sess = _FakeSession(lambda url, **kw: drip_resp)
+
+    assert (
+        fetch_validated_product_image(
+            "https://cdn.example.com/drip.png",
+            timeout_seconds=10.0,
+            resolver=lambda h, p, type=0: [_addrinfo_v4("93.184.216.34", p)],
+            session_factory=lambda h, ips: drip_sess,
+        )
+        is None
+    )
+    assert drip_resp.iter_content_called is True
+    assert drip_resp.chunks_yielded == 2
+    assert drip_resp.closed is True
+    assert drip_sess.closed is True
+
+    # 2. Redirect chain shrinks per-hop timeout budget and aborts once monotonic deadline is exceeded.
+    clock[0] = 1000.0
+    monkeypatch.setenv("GEN_AI_MAX_IMAGE_REDIRECTS", "3")
+
+    resolved_hosts: List[str] = []
+    hop_sessions: List[Tuple[str, _FakeSession]] = []
+    hop_responses: List[_FakeStreamResponse] = []
+
+    def _redirect_resolver(host: str, port: int, type: int = 0) -> List[Any]:
+        resolved_hosts.append(host)
+        return [_addrinfo_v4("93.184.216.34", port)]
+
+    def _redirect_session_factory(host: str, ips: List[str]) -> _FakeSession:
+        def _handler(url: str, **kw: Any) -> _FakeStreamResponse:
+            if host == "cdn1.example.com":
+                clock[0] += 6.0
+                resp = _FakeStreamResponse(
+                    status_code=302,
+                    headers={"Location": "https://cdn2.example.com/hop1.png"},
+                )
+            elif host == "cdn2.example.com":
+                clock[0] += 3.5
+                resp = _FakeStreamResponse(
+                    status_code=302,
+                    headers={"Location": "https://cdn3.example.com/hop2.png"},
+                )
+            else:
+                raise AssertionError(f"Deadline should have aborted before {host}")
+            hop_responses.append(resp)
+            return resp
+
+        sess = _FakeSession(_handler)
+        hop_sessions.append((host, sess))
+        return sess
+
+    assert (
+        fetch_validated_product_image(
+            "https://cdn1.example.com/start.png",
+            timeout_seconds=9.0,
+            resolver=_redirect_resolver,
+            session_factory=_redirect_session_factory,
+        )
+        is None
+    )
+    assert resolved_hosts == ["cdn1.example.com", "cdn2.example.com"]
+    assert len(hop_sessions) == 2
+    assert hop_sessions[0][1].calls[0]["timeout"] == (5.0, 9.0)
+    assert hop_sessions[1][1].calls[0]["timeout"] == (3.0, 3.0)
+    assert all(sess.closed for _, sess in hop_sessions)
+    assert all(resp.closed for resp in hop_responses)
 
 
 def test_decode_bounded_base64_image_validation_mime_detection_and_size_caps() -> None:
@@ -1035,6 +1324,7 @@ def test_image_fetcher_imports_cleanly_under_both_pythonpath_roots(
         "mod = importlib.import_module(sys.argv[1])\n"
         "assert mod.DEFAULT_MAX_IMAGE_BYTES == 10 * 1024 * 1024\n"
         "assert mod.MAX_IMAGE_URL_CHARS == 2048\n"
+        "assert mod.MAX_PINNED_CONNECT_IPS == 4\n"
         "assert mod.STREAM_CHUNK_BYTES == 65536\n"
     )
     for pythonpath, module_name in (

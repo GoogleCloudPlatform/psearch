@@ -23,6 +23,7 @@ import math
 import os
 import re
 import socket
+import time
 from typing import Any, Callable, Iterable, List, Optional, Sequence, Tuple
 import urllib.parse
 
@@ -40,6 +41,7 @@ DEFAULT_IMAGE_FETCH_TIMEOUT_SECONDS: float = 10.0
 DEFAULT_MAX_IMAGE_REDIRECTS: int = 0
 MAX_ALLOWED_IMAGE_REDIRECTS: int = 3
 MAX_CONNECT_TIMEOUT_SECONDS: float = 5.0
+MAX_PINNED_CONNECT_IPS: int = 4
 MAX_IMAGE_URL_CHARS: int = 2048
 STREAM_CHUNK_BYTES: int = 65536
 
@@ -437,7 +439,10 @@ def validate_and_normalize_image_url(
             f"https://{normalized_host}/{bucket}/{'/'.join(encoded_segments)}"
         )
     elif lower_prefix == "https://":
-        parsed = urllib.parse.urlsplit(image_url)
+        try:
+            parsed = urllib.parse.urlsplit(image_url)
+        except ValueError as exc:
+            raise ImageValidationError("Invalid HTTPS image URL") from exc
         if parsed.scheme.lower() != "https" or not parsed.netloc:
             raise ImageValidationError("Invalid HTTPS image URL")
         if parsed.fragment:
@@ -536,12 +541,14 @@ class _PinnedIPHTTPSConnection(urllib3.connection.HTTPSConnection):
 
     pinned_ips: Tuple[str, ...] = ()
     original_hostname: str = ""
+    deadline_monotonic: Optional[float] = None
 
     def __init__(
         self,
         *args: Any,
         pinned_ips: Optional[Sequence[str]] = None,
         original_hostname: Optional[str] = None,
+        deadline_monotonic: Optional[float] = None,
         **kwargs: Any,
     ) -> None:
         resolved_ips = tuple(
@@ -555,8 +562,14 @@ class _PinnedIPHTTPSConnection(urllib3.connection.HTTPSConnection):
             if original_hostname is not None
             else (self.original_hostname or self.host)
         )
+        resolved_deadline = (
+            deadline_monotonic
+            if deadline_monotonic is not None
+            else self.deadline_monotonic
+        )
         self._pinned_ips: Tuple[str, ...] = resolved_ips
         self._original_hostname: str = resolved_host
+        self._deadline_monotonic: Optional[float] = resolved_deadline
         self.host = resolved_host
         self.server_hostname = resolved_host
 
@@ -564,15 +577,31 @@ class _PinnedIPHTTPSConnection(urllib3.connection.HTTPSConnection):
         last_timeout: Optional[BaseException] = None
         last_os_error: Optional[OSError] = None
 
-        for pinned_ip in self._pinned_ips:
-            if is_disallowed_ip(pinned_ip):
+        for ip_str in self._pinned_ips:
+            if is_disallowed_ip(ip_str):
                 raise urllib3.exceptions.NewConnectionError(
-                    self, f"Refusing TCP connection to disallowed IP: {pinned_ip}"
+                    self, f"Refusing TCP connection to disallowed IP: {ip_str}"
                 )
+
+        for pinned_ip in self._pinned_ips[:MAX_PINNED_CONNECT_IPS]:
+            attempt_timeout: Any = self.timeout
+            if self._deadline_monotonic is not None:
+                remaining = self._deadline_monotonic - time.monotonic()
+                if remaining <= 0.0:
+                    raise urllib3.exceptions.ConnectTimeoutError(
+                        self,
+                        f"Connection to {self.host} timed out. (deadline exceeded)",
+                    ) from (last_timeout or last_os_error)
+                if isinstance(self.timeout, (int, float)) and not isinstance(
+                    self.timeout, bool
+                ):
+                    attempt_timeout = min(float(self.timeout), remaining)
+                else:
+                    attempt_timeout = min(MAX_CONNECT_TIMEOUT_SECONDS, remaining)
             try:
                 return urllib3.util.connection.create_connection(
                     (pinned_ip, self.port),
-                    timeout=self.timeout,
+                    timeout=attempt_timeout,
                     source_address=self.source_address,
                     socket_options=self.socket_options,
                 )
@@ -606,6 +635,7 @@ class _PinnedIPHTTPSAdapter(requests.adapters.HTTPAdapter):
         hostname: str,
         pinned_ips: Sequence[str],
         *args: Any,
+        deadline_monotonic: Optional[float] = None,
         **kwargs: Any,
     ) -> None:
         normalized_host = _normalize_host_entry(hostname)
@@ -621,6 +651,7 @@ class _PinnedIPHTTPSAdapter(requests.adapters.HTTPAdapter):
                 )
         self._hostname = normalized_host
         self._pinned_ips = ips_tuple
+        self._deadline_monotonic: Optional[float] = deadline_monotonic
         kwargs.setdefault("max_retries", 0)
         super().__init__(*args, **kwargs)
 
@@ -634,10 +665,15 @@ class _PinnedIPHTTPSAdapter(requests.adapters.HTTPAdapter):
         super().init_poolmanager(connections, maxsize, block=block, **pool_kwargs)
         bound_hostname = self._hostname
         bound_ips = self._pinned_ips
+        adapter_ref = self
 
         class _BoundPinnedHTTPSConnection(_PinnedIPHTTPSConnection):
             pinned_ips = bound_ips
             original_hostname = bound_hostname
+
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                kwargs.setdefault("deadline_monotonic", adapter_ref._deadline_monotonic)
+                super().__init__(*args, **kwargs)
 
         class _BoundPinnedHTTPSConnectionPool(_PinnedIPHTTPSConnectionPool):
             ConnectionCls = _BoundPinnedHTTPSConnection
@@ -660,12 +696,18 @@ class _PinnedIPHTTPSAdapter(requests.adapters.HTTPAdapter):
             raise requests.exceptions.SSLError(
                 "TLS certificate verification cannot be disabled for pinned image fetches"
             )
-        parsed = urllib.parse.urlsplit(request.url or "")
+        try:
+            parsed = urllib.parse.urlsplit(request.url or "")
+            req_port = parsed.port
+        except ValueError as exc:
+            raise requests.exceptions.InvalidURL(
+                f"Invalid request URL for pinned HTTPS target '{self._hostname}'"
+            ) from exc
         req_host = _normalize_host_entry(parsed.hostname or "")
         if (
             parsed.scheme.lower() != "https"
             or req_host != self._hostname
-            or parsed.port not in (None, 443)
+            or req_port not in (None, 443)
         ):
             raise requests.exceptions.InvalidURL(
                 f"Request URL does not match pinned HTTPS target '{self._hostname}'"
@@ -681,7 +723,10 @@ class _PinnedIPHTTPSAdapter(requests.adapters.HTTPAdapter):
 
 
 def _create_pinned_https_session(
-    hostname: str, validated_ips: List[str]
+    hostname: str,
+    validated_ips: List[str],
+    *,
+    deadline_monotonic: Optional[float] = None,
 ) -> requests.Session:
     session = requests.Session()
     session.trust_env = False
@@ -692,6 +737,7 @@ def _create_pinned_https_session(
         _PinnedIPHTTPSAdapter(
             hostname=hostname,
             pinned_ips=validated_ips,
+            deadline_monotonic=deadline_monotonic,
             pool_connections=1,
             pool_maxsize=1,
         ),
@@ -708,7 +754,8 @@ def _redact_url_for_log(raw_url: Any) -> str:
     try:
         parsed = urllib.parse.urlsplit(sanitized)
     except ValueError:
-        return sanitized[:128]
+        head, sep, _ = sanitized.partition("?")
+        return f"{head[:128]}?<redacted>" if sep else sanitized[:128]
     if not parsed.scheme or not parsed.netloc:
         return sanitized[:128]
     host_part = parsed.hostname or "<invalid-host>"
@@ -721,6 +768,7 @@ def _redact_url_for_log(raw_url: Any) -> str:
 def _read_bounded_raster_response(
     response: requests.Response,
     max_bytes: int,
+    deadline_monotonic: Optional[float] = None,
 ) -> Tuple[bytes, str]:
     raw_content_type = response.headers.get("Content-Type", "")
     media_type = raw_content_type.split(";", 1)[0].strip().lower()
@@ -745,9 +793,14 @@ def _read_bounded_raster_response(
         if declared_length > max_bytes:
             raise ImageTooLargeError("Image exceeds maximum allowed size")
 
+    if deadline_monotonic is not None and time.monotonic() > deadline_monotonic:
+        raise ImageValidationError("Image fetch exceeded timeout deadline")
+
     chunks: List[bytes] = []
     total_bytes = 0
     for chunk in response.iter_content(chunk_size=STREAM_CHUNK_BYTES):
+        if deadline_monotonic is not None and time.monotonic() > deadline_monotonic:
+            raise ImageValidationError("Image fetch exceeded timeout deadline")
         if not chunk:
             continue
         total_bytes += len(chunk)
@@ -803,10 +856,7 @@ def fetch_validated_product_image(
         else _normalize_explicit_allowed_hosts(allowed_hosts)
     )
 
-    timeout_tuple = (
-        min(MAX_CONNECT_TIMEOUT_SECONDS, resolved_timeout),
-        resolved_timeout,
-    )
+    deadline = time.monotonic() + resolved_timeout
     build_session = (
         session_factory
         if session_factory is not None
@@ -816,6 +866,9 @@ def fetch_validated_product_image(
     try:
         current_url = image_url
         for hop in range(resolved_max_redirects + 1):
+            if time.monotonic() > deadline:
+                raise ImageValidationError("Image fetch exceeded timeout deadline")
+
             normalized_url, normalized_host = validate_and_normalize_image_url(
                 current_url,
                 allowed_hosts=effective_allowed_hosts,
@@ -826,7 +879,23 @@ def fetch_validated_product_image(
                 resolver=resolver,
             )
 
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                raise ImageValidationError("Image fetch exceeded timeout deadline")
+            timeout_tuple = (
+                min(MAX_CONNECT_TIMEOUT_SECONDS, remaining),
+                remaining,
+            )
+
             session = build_session(normalized_host, validated_ips)
+            adapters = getattr(session, "adapters", None)
+            if isinstance(adapters, dict):
+                for adapter in adapters.values():
+                    if (
+                        isinstance(adapter, _PinnedIPHTTPSAdapter)
+                        and adapter._deadline_monotonic is None
+                    ):
+                        adapter._deadline_monotonic = deadline
             try:
                 with session.get(
                     normalized_url,
@@ -850,7 +919,12 @@ def fetch_validated_product_image(
                             raise ImageValidationError(
                                 "Invalid or disallowed redirect Location header"
                             )
-                        current_url = urllib.parse.urljoin(normalized_url, location)
+                        try:
+                            current_url = urllib.parse.urljoin(normalized_url, location)
+                        except ValueError as exc:
+                            raise ImageValidationError(
+                                "Invalid HTTPS image URL"
+                            ) from exc
                         continue
 
                     if status_code != 200:
@@ -861,6 +935,7 @@ def fetch_validated_product_image(
                     return _read_bounded_raster_response(
                         response,
                         max_bytes=resolved_max_bytes,
+                        deadline_monotonic=deadline,
                     )
             finally:
                 close_fn = getattr(session, "close", None)
@@ -942,6 +1017,7 @@ __all__ = [
     "ImageTooLargeError",
     "ImageValidationError",
     "MAX_IMAGE_URL_CHARS",
+    "MAX_PINNED_CONNECT_IPS",
     "STREAM_CHUNK_BYTES",
     "decode_bounded_base64_image",
     "detect_raster_mime_type",
