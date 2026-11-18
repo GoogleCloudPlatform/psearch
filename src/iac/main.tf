@@ -169,6 +169,8 @@ module "gen_ai" {
   rate_limit_per_minute          = var.gen_ai_rate_limit_per_minute
   sql_task_rate_limit_per_minute = var.gen_ai_sql_task_rate_limit_per_minute
   max_concurrent_sql_tasks       = var.gen_ai_max_concurrent_sql_tasks
+  allowed_image_hosts            = var.gen_ai_allowed_image_hosts
+  max_image_bytes                = var.gen_ai_max_image_bytes
 
   depends_on = [
     time_sleep.wait_for_iam

@@ -753,3 +753,74 @@ def test_all_iac_tf_files_parse_cleanly():
     for tf_file in tf_files:
         parsed = _load_tf(tf_file)
         assert isinstance(parsed, dict), f"Failed to parse {tf_file}"
+
+
+def test_gen_ai_image_ssrf_and_max_bytes_iac_variables_and_wiring():
+    gen_ai_main = _load_tf(IAC_ROOT / "modules" / "gen_ai" / "main.tf")
+    gen_ai_svc = [
+        r["google_cloud_run_v2_service"]["gen_ai_service"]
+        for r in gen_ai_main.get("resource", [])
+        if "google_cloud_run_v2_service" in r
+    ][0]
+    gen_ai_envs = {
+        e["name"]: e["value"]
+        for e in gen_ai_svc["template"][0]["containers"][0]["env"]
+    }
+    assert gen_ai_envs["GEN_AI_ALLOWED_IMAGE_HOSTS"] == "${var.allowed_image_hosts}"
+    assert (
+        gen_ai_envs["GEN_AI_MAX_IMAGE_BYTES"]
+        == "${tostring(var.max_image_bytes)}"
+    )
+
+    gen_ai_vars = {
+        k: v
+        for item in _load_tf(IAC_ROOT / "modules" / "gen_ai" / "variables.tf").get(
+            "variable", []
+        )
+        for k, v in item.items()
+    }
+    assert "allowed_image_hosts" in gen_ai_vars
+    assert "string" in str(gen_ai_vars["allowed_image_hosts"]["type"])
+    assert gen_ai_vars["allowed_image_hosts"]["default"] == ""
+
+    assert "max_image_bytes" in gen_ai_vars
+    assert "number" in str(gen_ai_vars["max_image_bytes"]["type"])
+    assert gen_ai_vars["max_image_bytes"]["default"] == 10485760
+    mod_validations = gen_ai_vars["max_image_bytes"].get("validation", [])
+    assert len(mod_validations) >= 1
+    mod_cond = mod_validations[0]["condition"]
+    assert "var.max_image_bytes > 0" in mod_cond
+    assert "floor(var.max_image_bytes) == var.max_image_bytes" in mod_cond
+
+    root_vars = {
+        k: v
+        for item in _load_tf(IAC_ROOT / "variables.tf").get("variable", [])
+        for k, v in item.items()
+    }
+    assert "gen_ai_allowed_image_hosts" in root_vars
+    assert "string" in str(root_vars["gen_ai_allowed_image_hosts"]["type"])
+    assert root_vars["gen_ai_allowed_image_hosts"]["default"] == ""
+
+    assert "gen_ai_max_image_bytes" in root_vars
+    assert "number" in str(root_vars["gen_ai_max_image_bytes"]["type"])
+    assert root_vars["gen_ai_max_image_bytes"]["default"] == 10485760
+    root_validations = root_vars["gen_ai_max_image_bytes"].get("validation", [])
+    assert len(root_validations) >= 1
+    root_cond = root_validations[0]["condition"]
+    assert "var.gen_ai_max_image_bytes > 0" in root_cond
+    assert "floor(var.gen_ai_max_image_bytes) == var.gen_ai_max_image_bytes" in root_cond
+
+    root_modules = {
+        k: v
+        for item in _load_tf(IAC_ROOT / "main.tf").get("module", [])
+        for k, v in item.items()
+    }
+    assert (
+        root_modules["gen_ai"]["allowed_image_hosts"]
+        == "${var.gen_ai_allowed_image_hosts}"
+    )
+    assert (
+        root_modules["gen_ai"]["max_image_bytes"]
+        == "${var.gen_ai_max_image_bytes}"
+    )
+
