@@ -45,6 +45,13 @@ from .rate_limit import (
 )
 from .services.conversational_search_service import ConversationalSearchService
 from .services.enrichment_service import EnrichmentService
+from .services.image_fetcher import (
+    ImageTooLargeError,
+    ImageValidationError,
+    decode_bounded_base64_image,
+    get_max_image_bytes,
+    max_base64_chars_for_bytes,
+)
 from .services.imagen_service import ImageGenerationService
 from .services.marketing_service import MarketingService
 from .services.sql.common.input_validation import (
@@ -75,8 +82,13 @@ _service_cache_lock = threading.Lock()
 _SAFE_ENRICHMENT_ERRORS = {"Failed to parse response"}
 _SAFE_IMAGE_ERRORS = {
     "Invalid base64 image format",
+    "Image exceeds maximum allowed size",
     "Gemini response did not contain valid image data",
 }
+_BOUNDED_DATA_URI_HEADER_RE = re.compile(
+    r"^data:[^,]{1,100};base64,",
+    flags=re.IGNORECASE,
+)
 _SAFE_SQL_GENAI_ERROR_PREFIXES = (
     "No candidates in the GenAI response.",
     "Output truncated due to MAX_TOKENS limit.",
@@ -201,6 +213,51 @@ def _validate_task_id(task_id: str) -> str:
     if parsed.version != 4 or str(parsed) != task_id.lower():
         raise HTTPException(status_code=400, detail="Invalid task_id format")
     return str(parsed)
+
+
+def _enforce_enhanced_image_size_limit(image_base64: str) -> None:
+    """Reject oversized base64 image payloads with HTTP 413 before allocating decoded bytes."""
+    try:
+        max_bytes = get_max_image_bytes()
+    except ValueError as exc:
+        logger.error("Invalid GEN_AI_MAX_IMAGE_BYTES configuration: %s", exc)
+        raise HTTPException(
+            status_code=500,
+            detail="Internal server configuration error",
+        ) from exc
+
+    max_encoded_chars = max_base64_chars_for_bytes(max_bytes)
+    stripped = image_base64.strip()
+    if stripped[:5].lower() == "data:":
+        header_match = _BOUNDED_DATA_URI_HEADER_RE.match(stripped[:128])
+        if header_match is not None:
+            stripped_payload = stripped[header_match.end() :]
+        elif len(stripped) > max_encoded_chars + 128:
+            raise HTTPException(
+                status_code=413,
+                detail="Image exceeds maximum allowed size",
+            )
+        else:
+            stripped_payload = stripped
+    else:
+        stripped_payload = stripped
+
+    if len(stripped_payload) > max_encoded_chars:
+        raise HTTPException(
+            status_code=413,
+            detail="Image exceeds maximum allowed size",
+        )
+
+    if len(stripped_payload) == max_encoded_chars and max_bytes % 3 != 0:
+        try:
+            decode_bounded_base64_image(image_base64, max_bytes=max_bytes)
+        except ImageTooLargeError as exc:
+            raise HTTPException(
+                status_code=413,
+                detail="Image exceeds maximum allowed size",
+            ) from exc
+        except ImageValidationError:
+            pass
 
 
 def _sanitize_enrichment_result(result: Dict[str, Any]) -> Dict[str, Any]:
@@ -681,8 +738,9 @@ async def enrichment(
     """Enrich product data with AI-generated content."""
     logger.info(f"Received enrichment request for product: {request.product_id}")
     logger.info(f"Fields to enrich: {request.fields_to_enrich}")
-    if request.product_data.get("images"):
-        logger.info(f"Product has {len(request.product_data['images'])} images")
+    images = request.product_data.get("images")
+    if isinstance(images, list):
+        logger.info(f"Product has {len(images)} images")
 
     try:
         result = enrichment_service.process_enrichment(
@@ -742,8 +800,9 @@ async def marketing(
     logger.info(
         f"Target audience: {request.target_audience}, Max length: {request.max_length}"
     )
-    if request.product_data.get("images"):
-        logger.info(f"Product has {len(request.product_data['images'])} images")
+    images = request.product_data.get("images")
+    if isinstance(images, list):
+        logger.info(f"Product has {len(images)} images")
 
     try:
         result = marketing_service.generate_content(
@@ -814,6 +873,7 @@ async def generate_enhanced_image(
         logger.info(f"Background prompt: {request.background_prompt[:50]}...")
 
     try:
+        _enforce_enhanced_image_size_limit(request.image_base64)
         result = image_generation_service.generate_image(
             product_id=request.product_id,
             product_data=request.product_data,
@@ -822,6 +882,15 @@ async def generate_enhanced_image(
             person_description=request.person_description,
             style=request.style,
         )
+
+        if (
+            isinstance(result, dict)
+            and result.get("error") == "Image exceeds maximum allowed size"
+        ):
+            raise HTTPException(
+                status_code=413,
+                detail="Image exceeds maximum allowed size",
+            )
 
         logger.info(
             f"Enhanced image generation completed for product: {request.product_id}"

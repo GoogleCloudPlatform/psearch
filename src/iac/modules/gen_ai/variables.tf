@@ -136,3 +136,20 @@ variable "max_concurrent_sql_tasks" {
     error_message = "max_concurrent_sql_tasks must be greater than 0."
   }
 }
+
+variable "allowed_image_hosts" {
+  description = "Optional comma-separated allowlist of HTTPS hostnames allowed for outbound product image fetches (empty allows any validated public host)"
+  type        = string
+  default     = ""
+}
+
+variable "max_image_bytes" {
+  description = "Maximum allowed product image payload size in bytes for URL fetches and base64 image uploads (defaults to 10 MiB)"
+  type        = number
+  default     = 10485760
+
+  validation {
+    condition     = var.max_image_bytes > 0 && floor(var.max_image_bytes) == var.max_image_bytes
+    error_message = "max_image_bytes must be a positive integer."
+  }
+}

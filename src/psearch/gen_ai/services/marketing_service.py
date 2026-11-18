@@ -17,16 +17,15 @@
 Marketing Service - Generates marketing content for products
 """
 
+import json
+import logging
 import os
+from typing import Any, Dict, List, Optional, Tuple
 
 from google import genai
 from google.genai import types
-import logging
-import requests
-from typing import Dict, List, Any, Optional
-import json
-import base64
-from urllib.parse import urlparse
+
+from .image_fetcher import fetch_validated_product_image
 
 logger = logging.getLogger(__name__)
 
@@ -133,31 +132,17 @@ class MarketingService:
                 "content": f"Error generating marketing content: {str(e)}",
             }
 
+    def _fetch_product_image(self, image_url: str) -> Optional[Tuple[bytes, str]]:
+        """Fetch and validate product image bytes and canonical MIME type from URL."""
+        return fetch_validated_product_image(image_url)
+
     def _get_image_bytes_from_url(self, image_url: str) -> Optional[bytes]:
-        """Fetch image bytes from URL"""
-        try:
-            # Handle different URL formats (especially for Google Cloud Storage)
-            parsed_url = urlparse(image_url)
-
-            # If it's a GCS URL (gs://), convert it to HTTPS
-            if parsed_url.scheme == "gs":
-                bucket = parsed_url.netloc
-                object_path = parsed_url.path.lstrip("/")
-                url = f"https://storage.googleapis.com/{bucket}/{object_path}"
-            else:
-                url = image_url
-
-            response = requests.get(url, timeout=10)
-            if response.status_code == 200:
-                return response.content
-            else:
-                logger.warning(
-                    f"Failed to fetch image from {url}: {response.status_code}"
-                )
-                return None
-        except Exception as e:
-            logger.warning(f"Error fetching image from {image_url}: {str(e)}")
+        """Fetch validated image bytes from URL."""
+        fetched = self._fetch_product_image(image_url)
+        if fetched is None:
             return None
+        image_bytes, _ = fetched
+        return image_bytes
 
     def _build_prompt(
         self,
@@ -220,33 +205,31 @@ class MarketingService:
 
         # Try to get the product image and include it in the prompt
         try:
-            if product_data.get("images") and len(product_data["images"]) > 0:
-                image_url = product_data["images"][0].get("uri")
-                if image_url:
-                    image_bytes = self._get_image_bytes_from_url(image_url)
-                    if image_bytes:
-                        # Determine MIME type based on file extension
-                        if image_url.lower().endswith(".png"):
-                            mime_type = "image/png"
-                        elif image_url.lower().endswith((".jpg", ".jpeg")):
-                            mime_type = "image/jpeg"
-                        elif image_url.lower().endswith(".gif"):
-                            mime_type = "image/gif"
-                        else:
-                            mime_type = "image/jpeg"  # Default to JPEG
-
-                        # Add image part to the prompt
+            images = (
+                product_data.get("images") if isinstance(product_data, dict) else None
+            )
+            if isinstance(images, list) and len(images) > 0:
+                first_image = images[0]
+                image_url = (
+                    first_image.get("uri") if isinstance(first_image, dict) else None
+                )
+                if isinstance(image_url, str) and image_url:
+                    fetched_image = self._fetch_product_image(image_url)
+                    if fetched_image is not None:
+                        image_bytes, mime_type = fetched_image
                         image_part = types.Part.from_bytes(
                             data=image_bytes, mime_type=mime_type
                         )
                         parts.append(image_part)
                         logger.info(
-                            f"Added image from {image_url} to the marketing prompt"
+                            "Added validated product image to the marketing prompt"
                         )
                     else:
-                        logger.warning(f"Could not fetch image bytes from {image_url}")
+                        logger.warning(
+                            "Could not fetch validated product image for marketing prompt"
+                        )
                 else:
-                    logger.warning("Product has images but no URI found")
+                    logger.warning("Product has images but no valid URI found")
             else:
                 logger.info("No product images found for marketing content")
         except Exception as e:

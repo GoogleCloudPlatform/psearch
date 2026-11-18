@@ -15,14 +15,17 @@
 
 """Authentication, lazy DI initialization, CORS, validation, and sanitization tests for gen_ai."""
 
+import base64
 from concurrent.futures import ThreadPoolExecutor
+import json
 import os
 from pathlib import Path
+import socket
 import subprocess
 import sys
 import threading
 import time
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 from unittest.mock import MagicMock
 import uuid
 import warnings
@@ -42,12 +45,22 @@ from google.api_core.exceptions import BadRequest, Forbidden, NotFound
 from google.auth.exceptions import GoogleAuthError
 from google.genai.types import FinishReason
 import pytest
+import requests
 
 try:
     from psearch.gen_ai import auth, main as gen_ai_main
+    from psearch.gen_ai.services import (
+        enrichment_service as enrichment_service_mod,
+        image_fetcher,
+        imagen_service as imagen_service_mod,
+        marketing_service as marketing_service_mod,
+    )
     from psearch.gen_ai.services.conversational_search_service import (
         ConversationalSearchResponse,
     )
+    from psearch.gen_ai.services.enrichment_service import EnrichmentService
+    from psearch.gen_ai.services.imagen_service import ImageGenerationService
+    from psearch.gen_ai.services.marketing_service import MarketingService
     from psearch.gen_ai.services.sql.common.input_validation import (
         MAX_GENERATED_SQL_CHARS,
     )
@@ -65,9 +78,18 @@ except ModuleNotFoundError as exc:
     }:
         raise
     from gen_ai import auth, main as gen_ai_main
+    from gen_ai.services import (
+        enrichment_service as enrichment_service_mod,
+        image_fetcher,
+        imagen_service as imagen_service_mod,
+        marketing_service as marketing_service_mod,
+    )
     from gen_ai.services.conversational_search_service import (
         ConversationalSearchResponse,
     )
+    from gen_ai.services.enrichment_service import EnrichmentService
+    from gen_ai.services.imagen_service import ImageGenerationService
+    from gen_ai.services.marketing_service import MarketingService
     from gen_ai.services.sql.common.input_validation import (
         MAX_GENERATED_SQL_CHARS,
     )
@@ -1420,3 +1442,596 @@ def test_allowed_origins_normalizes_case_and_trailing_slash_and_skips_malformed(
         )
         assert none_resp.headers.get("access-control-allow-origin") is None
         assert none_resp.headers.get("access-control-allow-credentials") is None
+
+
+_SAMPLE_PNG_BYTES = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
+_SAMPLE_WEBP_BYTES = b"RIFF\x1a\x00\x00\x00WEBPVP8 \x0e\x00\x00\x00\x30\x01\x00\x9d\x01\x2a"
+
+
+class _FakePinnedStreamResponse:
+    """Minimal context-manager HTTP response double for pinned-session integration tests."""
+
+    def __init__(
+        self,
+        status_code: int,
+        headers: Dict[str, str],
+        body: bytes,
+    ) -> None:
+        self.status_code = status_code
+        self.headers = headers
+        self._body = body
+
+    def iter_content(self, chunk_size: int = 65536) -> Iterable[bytes]:
+        for offset in range(0, len(self._body), chunk_size):
+            yield self._body[offset : offset + chunk_size]
+
+    def close(self) -> None:
+        return None
+
+    def __enter__(self) -> "_FakePinnedStreamResponse":
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+        return False
+
+
+class _FakePinnedSession:
+    """Minimal session double recording pinned HTTPS fetches without touching real sockets."""
+
+    def __init__(
+        self,
+        hostname: str,
+        validated_ips: List[str],
+        route_table: Dict[str, Tuple[int, Dict[str, str], bytes]],
+        recorded_calls: List[Tuple[str, Tuple[str, ...], str]],
+    ) -> None:
+        self._hostname = hostname
+        self._validated_ips = tuple(validated_ips)
+        self._route_table = route_table
+        self._recorded_calls = recorded_calls
+
+    def get(
+        self,
+        url: str,
+        *,
+        stream: bool = False,
+        allow_redirects: bool = True,
+        timeout: Any = None,
+    ) -> _FakePinnedStreamResponse:
+        assert stream is True
+        assert allow_redirects is False
+        assert timeout is not None
+        self._recorded_calls.append((self._hostname, self._validated_ips, url))
+        status_code, headers, body = self._route_table[url]
+        return _FakePinnedStreamResponse(
+            status_code=status_code,
+            headers=headers,
+            body=body,
+        )
+
+    def close(self) -> None:
+        return None
+
+
+def test_enrichment_and_marketing_services_block_ssrf_and_attach_validated_raster_images(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """EnrichmentService and MarketingService block SSRF/non-image URLs and attach validated PNG/WebP parts."""
+    for var in (
+        "GEN_AI_MAX_IMAGE_BYTES",
+        "GEN_AI_IMAGE_FETCH_TIMEOUT_SECONDS",
+        "GEN_AI_MAX_IMAGE_REDIRECTS",
+        "GEN_AI_ALLOWED_IMAGE_HOSTS",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+    def _forbid_unvalidated_requests_get(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("Unvalidated requests.get must never be called")
+
+    monkeypatch.setattr(requests, "get", _forbid_unvalidated_requests_get)
+    assert not hasattr(enrichment_service_mod, "requests")
+    assert not hasattr(marketing_service_mod, "requests")
+
+    dns_map: Dict[str, str] = {
+        "evil.example.com": "10.0.0.5",
+        "json.example.com": "93.184.216.34",
+        "spoof.example.com": "93.184.216.34",
+        "cdn.example.com": "93.184.216.34",
+        "storage.googleapis.com": "142.250.80.16",
+    }
+
+    def _fake_getaddrinfo(host: str, port: int, type: int = 0) -> List[Any]:
+        ip = dns_map.get(host)
+        if ip is None:
+            raise socket.gaierror(f"Unexpected DNS lookup for {host}")
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (ip, port))]
+
+    ssrf_json_secret = b'{"secret": "metadata-token-12345"}'
+    route_table: Dict[str, Tuple[int, Dict[str, str], bytes]] = {
+        "https://json.example.com/secret.jpg": (
+            200,
+            {"Content-Type": "application/json"},
+            ssrf_json_secret,
+        ),
+        "https://spoof.example.com/secret.png": (
+            200,
+            {"Content-Type": "image/png"},
+            ssrf_json_secret,
+        ),
+        "https://cdn.example.com/catalog/item-42": (
+            200,
+            {"Content-Type": "image/webp"},
+            _SAMPLE_WEBP_BYTES,
+        ),
+        "https://storage.googleapis.com/psearch-catalog-bucket/products/shoe%2B1.png": (
+            200,
+            {"Content-Type": "image/png"},
+            _SAMPLE_PNG_BYTES,
+        ),
+    }
+    recorded_fetches: List[Tuple[str, Tuple[str, ...], str]] = []
+
+    monkeypatch.setattr(image_fetcher.socket, "getaddrinfo", _fake_getaddrinfo)
+    monkeypatch.setattr(
+        image_fetcher,
+        "_create_pinned_https_session",
+        lambda hostname, validated_ips: _FakePinnedSession(
+            hostname,
+            validated_ips,
+            route_table,
+            recorded_fetches,
+        ),
+    )
+
+    enrichment_captured_contents: List[Any] = []
+    marketing_captured_contents: List[Any] = []
+
+    enrichment_genai_client = MagicMock()
+    enrichment_genai_resp = MagicMock()
+    enrichment_genai_resp.text = json.dumps({"description": "Enriched copy"})
+
+    def _capture_enrichment_call(*, model: str, contents: Any, config: Any) -> Any:
+        enrichment_captured_contents.append(contents)
+        return enrichment_genai_resp
+
+    enrichment_genai_client.models.generate_content.side_effect = _capture_enrichment_call
+
+    marketing_genai_client = MagicMock()
+    marketing_genai_resp = MagicMock()
+    marketing_genai_resp.text = json.dumps({"content": "Marketing copy"})
+
+    def _capture_marketing_call(*, model: str, contents: Any, config: Any) -> Any:
+        marketing_captured_contents.append(contents)
+        return marketing_genai_resp
+
+    marketing_genai_client.models.generate_content.side_effect = _capture_marketing_call
+
+    clients = iter([enrichment_genai_client, marketing_genai_client])
+    monkeypatch.setattr("google.genai.Client", lambda **kwargs: next(clients))
+
+    enrichment_svc = EnrichmentService("proj-ssrf", "global")
+    marketing_svc = MarketingService("proj-ssrf", "global")
+
+    blocked_urls = [
+        "http://169.254.169.254/computeMetadata/v1/",
+        "https://metadata.google.internal/computeMetadata/v1/",
+        "https://evil.example.com/secret.jpg",
+        "https://json.example.com/secret.jpg",
+        "https://spoof.example.com/secret.png",
+    ]
+    for bad_url in blocked_urls:
+        enrichment_captured_contents.clear()
+        marketing_captured_contents.clear()
+
+        assert enrichment_svc._get_image_bytes_from_url(bad_url) is None
+        assert marketing_svc._get_image_bytes_from_url(bad_url) is None
+
+        enrich_res = enrichment_svc.process_enrichment(
+            product_id="p-ssrf",
+            product_data={"title": "Sneaker", "images": [{"uri": bad_url}]},
+            fields_to_enrich=["description"],
+        )
+        assert enrich_res["enriched_fields"]["description"] == "Enriched copy"
+        assert len(enrichment_captured_contents) == 1
+        enrich_parts = enrichment_captured_contents[0][0].parts
+        assert len(enrich_parts) == 1, f"Unexpected image part attached for {bad_url}"
+        assert "metadata-token-12345" not in (enrich_parts[0].text or "")
+
+        mkt_res = marketing_svc.generate_content(
+            product_id="p-ssrf",
+            product_data={"title": "Sneaker", "images": [{"uri": bad_url}]},
+            content_type="product_description",
+        )
+        assert mkt_res["content"] == "Marketing copy"
+        assert len(marketing_captured_contents) == 1
+        mkt_parts = marketing_captured_contents[0][0].parts
+        assert len(mkt_parts) == 1, f"Unexpected image part attached for {bad_url}"
+        assert "metadata-token-12345" not in (mkt_parts[0].text or "")
+
+    # Malformed bracketed IPv6 URL is also safely guarded inside _build_prompt without crashing
+    enrichment_captured_contents.clear()
+    marketing_captured_contents.clear()
+    assert (
+        enrichment_svc.process_enrichment(
+            product_id="p-ipv6-bad",
+            product_data={
+                "title": "Sneaker",
+                "images": [{"uri": "https://[::1/secret.png"}],
+            },
+            fields_to_enrich=["description"],
+        )["enriched_fields"]["description"]
+        == "Enriched copy"
+    )
+    assert len(enrichment_captured_contents[0][0].parts) == 1
+    assert (
+        marketing_svc.generate_content(
+            product_id="p-ipv6-bad",
+            product_data={
+                "title": "Sneaker",
+                "images": [{"uri": "https://[::1/secret.png"}],
+            },
+            content_type="product_description",
+        )["content"]
+        == "Marketing copy"
+    )
+    assert len(marketing_captured_contents[0][0].parts) == 1
+
+    # Verify private IP host (evil.example.com -> 10.0.0.5) and metadata hosts never opened a session
+    fetched_hosts = {host for host, _, _ in recorded_fetches}
+    assert "evil.example.com" not in fetched_hosts
+    assert "metadata.google.internal" not in fetched_hosts
+    assert "169.254.169.254" not in fetched_hosts
+
+    # Valid public HTTPS WebP (no .webp extension in URL) and gs:// PNG attach canonical MIME parts
+    valid_cases = [
+        ("https://cdn.example.com/catalog/item-42", _SAMPLE_WEBP_BYTES, "image/webp"),
+        (
+            "gs://psearch-catalog-bucket/products/shoe+1.png",
+            _SAMPLE_PNG_BYTES,
+            "image/png",
+        ),
+    ]
+    for good_url, expected_bytes, expected_mime in valid_cases:
+        assert enrichment_svc._fetch_product_image(good_url) == (
+            expected_bytes,
+            expected_mime,
+        )
+        assert enrichment_svc._get_image_bytes_from_url(good_url) == expected_bytes
+        assert marketing_svc._fetch_product_image(good_url) == (
+            expected_bytes,
+            expected_mime,
+        )
+        assert marketing_svc._get_image_bytes_from_url(good_url) == expected_bytes
+
+        enrichment_captured_contents.clear()
+        marketing_captured_contents.clear()
+
+        enrichment_svc.process_enrichment(
+            product_id="p-ok",
+            product_data={"title": "Sneaker", "images": [{"uri": good_url}]},
+            fields_to_enrich=["description"],
+        )
+        enrich_parts = enrichment_captured_contents[0][0].parts
+        assert len(enrich_parts) == 2
+        assert enrich_parts[1].inline_data.data == expected_bytes
+        assert enrich_parts[1].inline_data.mime_type == expected_mime
+
+        marketing_svc.generate_content(
+            product_id="p-ok",
+            product_data={"title": "Sneaker", "images": [{"uri": good_url}]},
+            content_type="product_description",
+        )
+        mkt_parts = marketing_captured_contents[0][0].parts
+        assert len(mkt_parts) == 2
+        assert mkt_parts[1].inline_data.data == expected_bytes
+        assert mkt_parts[1].inline_data.mime_type == expected_mime
+
+
+def test_enrichment_and_marketing_routes_handle_malformed_images_cleanly(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """POST /enrichment and POST /marketing return HTTP 200 on malformed product_data['images'] shapes."""
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv("GEN_AI_ADMIN_TOKEN", "secret")
+    monkeypatch.setenv("PROJECT_ID", "malformed-images-proj")
+    monkeypatch.setenv("GENAI_LOCATION", "global")
+    auth_headers = {"X-Admin-Token": "secret"}
+
+    captured_calls: List[Any] = []
+    mock_genai_client = MagicMock()
+
+    def _fake_generate_content(*, model: str, contents: Any, config: Any) -> Any:
+        captured_calls.append(contents)
+        resp = MagicMock()
+        resp.text = json.dumps({"description": "Clean enrichment", "content": "Clean copy"})
+        return resp
+
+    mock_genai_client.models.generate_content.side_effect = _fake_generate_content
+    monkeypatch.setattr("google.genai.Client", lambda **kwargs: mock_genai_client)
+    gen_ai_main.clear_service_cache()
+
+    malformed_images_values: List[Any] = [
+        123,
+        True,
+        "https://cdn.example.com/shoe.png",
+        {"uri": "https://cdn.example.com/shoe.png"},
+        [None],
+        ["https://cdn.example.com/shoe.png"],
+        [{}],
+        [{"uri": 123}],
+        [{"uri": ""}],
+    ]
+
+    app = gen_ai_main.create_app()
+    try:
+        with TestClient(app) as client:
+            for malformed_images in malformed_images_values:
+                captured_calls.clear()
+                enrich_resp = client.post(
+                    "/enrichment",
+                    headers=auth_headers,
+                    json={
+                        "product_id": "p-malformed",
+                        "product_data": {
+                            "title": "Running Shoe",
+                            "images": malformed_images,
+                        },
+                        "fields_to_enrich": ["description"],
+                    },
+                )
+                assert enrich_resp.status_code == 200, (
+                    f"/enrichment failed on images={malformed_images!r}: {enrich_resp.text}"
+                )
+                assert enrich_resp.json() == {
+                    "product_id": "p-malformed",
+                    "enriched_fields": {"description": "Clean enrichment"},
+                }
+                assert len(captured_calls) == 1
+                assert len(captured_calls[0][0].parts) == 1
+
+                captured_calls.clear()
+                mkt_resp = client.post(
+                    "/marketing",
+                    headers=auth_headers,
+                    json={
+                        "product_id": "p-malformed",
+                        "product_data": {
+                            "title": "Running Shoe",
+                            "images": malformed_images,
+                        },
+                        "content_type": "product_description",
+                    },
+                )
+                assert mkt_resp.status_code == 200, (
+                    f"/marketing failed on images={malformed_images!r}: {mkt_resp.text}"
+                )
+                assert mkt_resp.json() == {
+                    "product_id": "p-malformed",
+                    "content": "Clean copy",
+                }
+                assert len(captured_calls) == 1
+                assert len(captured_calls[0][0].parts) == 1
+    finally:
+        gen_ai_main.clear_service_cache()
+
+
+def test_generate_enhanced_image_enforces_413_size_limits_and_preserves_base64_contracts(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """POST /generate-enhanced-image enforces 413 pre-decode bounds while preserving 'A' and 'YWJj' contracts."""
+    assert "Image exceeds maximum allowed size" in gen_ai_main._SAFE_IMAGE_ERRORS
+
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv("GEN_AI_ADMIN_TOKEN", "secret")
+    monkeypatch.setenv("PROJECT_ID", "imagen-bounds-proj")
+    monkeypatch.setenv("GENAI_LOCATION", "global")
+    auth_headers = {"X-Admin-Token": "secret"}
+
+    captured_imagen_contents: List[Any] = []
+    mock_genai_client = MagicMock()
+
+    def _fake_imagen_generate(*, model: str, contents: Any, config: Any) -> Any:
+        captured_imagen_contents.append(contents)
+        part = MagicMock()
+        part.inline_data.mime_type = "image/png"
+        part.inline_data.data = _SAMPLE_PNG_BYTES
+        cand = MagicMock()
+        cand.content.parts = [part]
+        resp = MagicMock()
+        resp.candidates = [cand]
+        return resp
+
+    mock_genai_client.models.generate_content.side_effect = _fake_imagen_generate
+    monkeypatch.setattr("google.genai.Client", lambda **kwargs: mock_genai_client)
+    gen_ai_main.clear_service_cache()
+
+    app = gen_ai_main.create_app()
+    try:
+        with TestClient(app) as client:
+            # 1. Oversized raw and data:image/png;base64,... payloads rejected at route pre-check with 413
+            #    WITHOUT allocating decoded bytes or calling ImageGenerationService.generate_image.
+            monkeypatch.setenv("GEN_AI_MAX_IMAGE_BYTES", "32")
+            oversized_raw_b64 = base64.b64encode(b"X" * 64).decode("ascii")
+            oversized_data_uri = f"data:image/png;base64,{oversized_raw_b64}"
+
+            spy_b64decode = MagicMock(wraps=image_fetcher.base64.b64decode)
+            monkeypatch.setattr(image_fetcher.base64, "b64decode", spy_b64decode)
+
+            for payload in (oversized_raw_b64, oversized_data_uri):
+                resp_413 = client.post(
+                    "/generate-enhanced-image",
+                    headers=auth_headers,
+                    json={
+                        "product_id": "p1",
+                        "product_data": {"title": "Shoe"},
+                        "image_base64": payload,
+                        "background_prompt": "studio",
+                    },
+                )
+                assert resp_413.status_code == 413
+                assert resp_413.json() == {
+                    "detail": "Image exceeds maximum allowed size"
+                }
+
+            spy_b64decode.assert_not_called()
+            assert captured_imagen_contents == []
+
+            # 2. Quantum-boundary payloads where len(stripped) == max_base64_chars_for_bytes(4) == 8
+            #    but decoded bytes == 5 > 4 also return 413, while 4 decoded bytes succeed with 200.
+            monkeypatch.setenv("GEN_AI_MAX_IMAGE_BYTES", "4")
+            five_byte_b64 = base64.b64encode(b"12345").decode("ascii")
+            assert len(five_byte_b64) == 8
+            for boundary_payload in (
+                five_byte_b64,
+                f"data:image/png;base64,{five_byte_b64}",
+            ):
+                boundary_413 = client.post(
+                    "/generate-enhanced-image",
+                    headers=auth_headers,
+                    json={
+                        "product_id": "p1",
+                        "product_data": {"title": "Shoe"},
+                        "image_base64": boundary_payload,
+                        "background_prompt": "studio",
+                    },
+                )
+                assert boundary_413.status_code == 413
+                assert boundary_413.json() == {
+                    "detail": "Image exceeds maximum allowed size"
+                }
+            assert captured_imagen_contents == []
+
+            four_byte_b64 = base64.b64encode(b"1234").decode("ascii")
+            exact_ok = client.post(
+                "/generate-enhanced-image",
+                headers=auth_headers,
+                json={
+                    "product_id": "p1",
+                    "product_data": {"title": "Shoe"},
+                    "image_base64": four_byte_b64,
+                    "background_prompt": "studio",
+                },
+            )
+            assert exact_ok.status_code == 200
+            assert "generated_image_base64" in exact_ok.json()
+
+            # 3. Existing base64 contracts: "A" -> HTTP 200 Invalid base64 image format;
+            #    "YWJj" -> HTTP 200 with fallback mime_type="image/png";
+            #    valid WebP data URI -> HTTP 200 with detected mime_type="image/webp".
+            monkeypatch.setenv("GEN_AI_MAX_IMAGE_BYTES", "128")
+            bad_short = client.post(
+                "/generate-enhanced-image",
+                headers=auth_headers,
+                json={
+                    "product_id": "p1",
+                    "product_data": {"title": "Shoe"},
+                    "image_base64": "A",
+                    "background_prompt": "studio",
+                },
+            )
+            assert bad_short.status_code == 200
+            assert bad_short.json() == {
+                "product_id": "p1",
+                "error": "Invalid base64 image format",
+            }
+
+            captured_imagen_contents.clear()
+            synth_ok = client.post(
+                "/generate-enhanced-image",
+                headers=auth_headers,
+                json={
+                    "product_id": "p1",
+                    "product_data": {"title": "Shoe"},
+                    "image_base64": "YWJj",
+                    "background_prompt": "studio",
+                },
+            )
+            assert synth_ok.status_code == 200
+            assert len(captured_imagen_contents) == 1
+            assert captured_imagen_contents[0][0].inline_data.data == b"abc"
+            assert captured_imagen_contents[0][0].inline_data.mime_type == "image/png"
+
+            captured_imagen_contents.clear()
+            webp_data_uri = "data:image/webp;base64," + base64.b64encode(
+                _SAMPLE_WEBP_BYTES
+            ).decode("ascii")
+            webp_ok = client.post(
+                "/generate-enhanced-image",
+                headers=auth_headers,
+                json={
+                    "product_id": "p1",
+                    "product_data": {"title": "Shoe"},
+                    "image_base64": webp_data_uri,
+                    "background_prompt": "studio",
+                },
+            )
+            assert webp_ok.status_code == 200
+            assert len(captured_imagen_contents) == 1
+            assert (
+                captured_imagen_contents[0][0].inline_data.data == _SAMPLE_WEBP_BYTES
+            )
+            assert (
+                captured_imagen_contents[0][0].inline_data.mime_type == "image/webp"
+            )
+
+            # 4. Direct ImageGenerationService.generate_image returns safe error dict on ImageTooLargeError,
+            #    and route maps service-returned "Image exceeds maximum allowed size" to HTTP 413.
+            monkeypatch.setenv("GEN_AI_MAX_IMAGE_BYTES", "8")
+            direct_svc = ImageGenerationService("imagen-bounds-proj", "global")
+            direct_too_large = direct_svc.generate_image(
+                product_id="p-direct",
+                product_data={"title": "Shoe"},
+                image_base64=base64.b64encode(b"0123456789ABCDEF").decode("ascii"),
+                background_prompt="studio",
+            )
+            assert direct_too_large == {
+                "product_id": "p-direct",
+                "error": "Image exceeds maximum allowed size",
+            }
+
+            stub_svc = MagicMock()
+            stub_svc.generate_image.return_value = {
+                "product_id": "p1",
+                "error": "Image exceeds maximum allowed size",
+            }
+            app.dependency_overrides[gen_ai_main.get_image_generation_service] = (
+                lambda: stub_svc
+            )
+            try:
+                svc_413 = client.post(
+                    "/generate-enhanced-image",
+                    headers=auth_headers,
+                    json={
+                        "product_id": "p1",
+                        "product_data": {"title": "Shoe"},
+                        "image_base64": "YWJj",
+                        "background_prompt": "studio",
+                    },
+                )
+                assert svc_413.status_code == 413
+                assert svc_413.json() == {
+                    "detail": "Image exceeds maximum allowed size"
+                }
+            finally:
+                app.dependency_overrides.clear()
+
+            # 5. Misconfigured GEN_AI_MAX_IMAGE_BYTES maps to HTTP 500 "Internal server configuration error"
+            for bad_cfg in ("0", "-10", "not-an-int"):
+                monkeypatch.setenv("GEN_AI_MAX_IMAGE_BYTES", bad_cfg)
+                cfg_500 = client.post(
+                    "/generate-enhanced-image",
+                    headers=auth_headers,
+                    json={
+                        "product_id": "p1",
+                        "product_data": {"title": "Shoe"},
+                        "image_base64": "YWJj",
+                        "background_prompt": "studio",
+                    },
+                )
+                assert cfg_500.status_code == 500
+                assert cfg_500.json() == {
+                    "detail": "Internal server configuration error"
+                }
+    finally:
+        gen_ai_main.clear_service_cache()
+

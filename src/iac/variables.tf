@@ -165,6 +165,23 @@ variable "gen_ai_max_concurrent_sql_tasks" {
   }
 }
 
+variable "gen_ai_allowed_image_hosts" {
+  description = "Optional comma-separated allowlist of HTTPS hostnames allowed for gen-ai-service product image fetches"
+  type        = string
+  default     = ""
+}
+
+variable "gen_ai_max_image_bytes" {
+  description = "Maximum allowed product image payload size in bytes for gen-ai-service (defaults to 10 MiB)"
+  type        = number
+  default     = 10485760
+
+  validation {
+    condition     = var.gen_ai_max_image_bytes > 0 && floor(var.gen_ai_max_image_bytes) == var.gen_ai_max_image_bytes
+    error_message = "gen_ai_max_image_bytes must be a positive integer."
+  }
+}
+
 variable "search_api_invoker_members" {
   description = "Explicit IAM principals granted roles/run.invoker on product-search-api (defaults to none)"
   type        = list(string)

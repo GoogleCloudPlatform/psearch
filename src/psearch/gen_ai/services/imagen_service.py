@@ -17,13 +17,19 @@
 Imagen Service - Generates product images using Imagen API
 """
 
+import base64
+import logging
 import os
+from typing import Any, Dict, List, Optional
 
 from google import genai
 from google.genai import types
-import logging
-import base64
-from typing import Dict, List, Any, Optional
+
+from .image_fetcher import (
+    ImageTooLargeError,
+    ImageValidationError,
+    decode_bounded_base64_image,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -66,14 +72,18 @@ class ImageGenerationService:
         """
         logger.info(f"Generating enhanced image for product {product_id}")
 
-        # Decode base image
+        # Decode and validate bounded base64 image
         try:
-            # Ensure padding is correct for base64 decoding
-            missing_padding = len(image_base64) % 4
-            if missing_padding:
-                image_base64 += "=" * (4 - missing_padding)
-            image_bytes = base64.b64decode(image_base64)
-        except Exception as e:
+            image_bytes, mime_type = decode_bounded_base64_image(image_base64)
+        except ImageTooLargeError as e:
+            logger.warning(
+                f"Base64 image exceeds maximum allowed size for product {product_id}: {e}"
+            )
+            return {
+                "product_id": product_id,
+                "error": "Image exceeds maximum allowed size",
+            }
+        except ImageValidationError as e:
             logger.error(f"Error decoding base64 image for product {product_id}: {e}")
             return {
                 "product_id": product_id,
@@ -88,9 +98,8 @@ class ImageGenerationService:
             style=style,
         )
 
-        # Prepare image part
-        # TODO: Determine correct mime_type dynamically or ensure input is consistent
-        image_part = types.Part.from_bytes(data=image_bytes, mime_type="image/png")
+        # Prepare image part with detected raster MIME type (or PNG fallback)
+        image_part = types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
 
         # Prepare text part
         text_part = types.Part.from_text(text=prompt_text)

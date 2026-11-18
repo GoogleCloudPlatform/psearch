@@ -36,6 +36,9 @@ Real project IDs, service-account emails and service URLs are intentionally repl
 | `API_TOKEN` | optional secret | read/query API key (`X-API-Key`); never grants admin writes |
 | `ADMIN_TOKEN` | unset | admin writes (rules, synonyms, embedding-version switch via `X-Admin-Token`) return 403 when unset |
 | `ALLOWED_ORIGINS` | explicit UI origin(s) or unset | comma-separated non-wildcard origins for credentialed CORS (`*` is ignored) |
+| `GEN_AI_ALLOWED_IMAGE_HOSTS` | unset (`""`) or explicit CDN/GCS hostnames | optional `gen-ai-service` allowlist for outbound `https://` / `gs://` product image fetches (pinned-DNS/IP SSRF guard is always active) |
+| `GEN_AI_MAX_IMAGE_BYTES` | `10485760` (`10 MiB`) | `gen-ai-service` byte ceiling for product image downloads and `POST /generate-enhanced-image` base64 payloads (`HTTP 413` when exceeded) |
+| `GEN_AI_IMAGE_FETCH_TIMEOUT_SECONDS` / `GEN_AI_MAX_IMAGE_REDIRECTS` | defaults `10.0` / `0` | `gen-ai-service` outbound image timeout (`min(5s, timeout)` connect) and redirect cap (`0..3`, `0` rejects all `3xx`) |
 | `BOOST_WEIGHT`, `SESSION_BOOST_WEIGHT`, `LTR_MODEL_JSON` | defaults (`0.002`, `0.003`, baseline model) | |
 
 Service account: `<RUNTIME_SA>`. Full variable reference: [DESIGN.md §16](DESIGN.md#16-configuration-environment).

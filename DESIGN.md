@@ -19,7 +19,7 @@ graph TD
     Build[Cloud Build] -. deploys .-> API
 ```
 
-The serving binary (`cmd/server/main.go`) owns every request path. Spanner is the system of record for catalog, vectors, rules, synonyms, inventory, prices, suggestions, sessions and caches. Vertex AI is called only for query embeddings (v2) and, optionally, for the conversational-intent fallback.
+The serving binary (`cmd/server/main.go`) owns every request path. Spanner is the system of record for catalog, vectors, rules, synonyms, inventory, prices, suggestions, sessions and caches. Vertex AI is called only for query embeddings (v2) and, optionally, for the conversational-intent fallback. In `src/psearch/gen_ai`, outbound product image fetches (`services/image_fetcher.py`) enforce `https://` / `gs://` validation, single-hop pinned-IP TLS against DNS rebinding/SSRF, raster `Content-Type` + magic-byte checks, and `GEN_AI_MAX_IMAGE_BYTES` payload caps across enrichment, marketing, and base64 image enhancement.
 
 ### Code map
 
@@ -247,6 +247,10 @@ Base URL: the Cloud Run service URL (`<SERVICE_URL>`) or `http://localhost:8080`
 | `SERVING_ALLOWED_PRINCIPALS` | — | Comma-separated allowlisted OIDC email principals |
 | `SERVING_ALLOWED_DOMAINS` | — | Comma-separated allowlisted Workspace domains (`hd` must match email domain) |
 | `ALLOWED_ORIGINS` | — | Comma-separated explicit origins for credentialed CORS (`*` ignored) |
+| `GEN_AI_ALLOWED_IMAGE_HOSTS` | `""` | Optional comma-separated HTTPS hostname allowlist for `gen_ai` product image fetches (empty allows any validated global-IP host) |
+| `GEN_AI_MAX_IMAGE_BYTES` | `10485760` | Maximum byte size (`10 MiB`) for `gen_ai` product image downloads and `image_base64` uploads (`HTTP 413` on overflow) |
+| `GEN_AI_IMAGE_FETCH_TIMEOUT_SECONDS` | `10.0` | Connect/read timeout in seconds (`min(5.0, timeout)` connect) for `gen_ai` product image fetches |
+| `GEN_AI_MAX_IMAGE_REDIRECTS` | `0` | Redirect hop ceiling (`0..3`) for `gen_ai` product image fetches (`0` rejects all `3xx` redirects) |
 | `DEFAULT_HYBRID_ALPHA`, `DEFAULT_LIMIT`, `MIN_SCORE_VALUE` | 0.5, 20, 0 | Search defaults |
 | `PORT`, `STATIC_DIR`, `ENVIRONMENT` | 8080, `/app/static`, `production` | Server |
 | `SPANNER_DISABLE_BUILTIN_METRICS` | — | Set `true` in production to silence client metrics export |

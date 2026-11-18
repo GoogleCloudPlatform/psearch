@@ -119,6 +119,14 @@ resource "google_cloud_run_v2_service" "gen_ai_service" {
         name  = "GEN_AI_MAX_CONCURRENT_SQL_TASKS"
         value = tostring(var.max_concurrent_sql_tasks)
       }
+      env {
+        name  = "GEN_AI_ALLOWED_IMAGE_HOSTS"
+        value = var.allowed_image_hosts
+      }
+      env {
+        name  = "GEN_AI_MAX_IMAGE_BYTES"
+        value = tostring(var.max_image_bytes)
+      }
 
       resources {
         limits = {
